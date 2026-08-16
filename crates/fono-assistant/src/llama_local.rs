@@ -45,7 +45,15 @@ use crate::traits::{
     AssistantPromptCacheWarmup, TokenDelta, ToolEvent,
 };
 
-const MAX_NEW_TOKENS: i32 = 384;
+/// Reply length when the caller does not ask for one. Sized for a spoken
+/// answer, which is what the dictation and assistant paths want.
+const DEFAULT_MAX_NEW_TOKENS: i32 = 384;
+/// The largest reply a caller may ask for, as a fraction of the context.
+/// A caller that reserves most of the window leaves no room for the prompt,
+/// and the prefix cache refuses to serve a request whose prompt plus reserved
+/// reply would not fit — so an unbounded budget would quietly cost every turn
+/// its checkpoint.
+const MAX_NEW_TOKENS_CTX_SHARE: u32 = 4;
 pub(crate) const MIN_CTX: u32 = 512;
 
 /// Per-request generation knobs threaded into the prefix-cache decode path.
@@ -56,7 +64,7 @@ pub(crate) const MIN_CTX: u32 = 512;
 /// pass after a tool call reuses the same knobs with one field changed.
 #[derive(Clone)]
 struct GenParams {
-    /// Cap on generated tokens (already clamped to [`MAX_NEW_TOKENS`]).
+    /// Cap on generated tokens (already clamped to [`DEFAULT_MAX_NEW_TOKENS`]).
     max_new_tokens: i32,
     /// This request's cached prefix is the *static head* — system prompt, area
     /// and device names, tool catalogue — with no conversation in front of it,
@@ -275,6 +283,14 @@ impl LlamaLocalAssistant {
     fn note_cold_prefill(&self, layer: &str, reason: &str) {
         cold_prefill(layer, reason);
         self.cache_counters.record_cold_prefill(reason);
+    }
+
+    /// The largest reply this context will hand a caller that asks for one.
+    /// Never below the default, so asking explicitly can only ever raise the
+    /// budget, never lower it below what silence would have given.
+    fn max_new_tokens_ceiling(&self) -> i32 {
+        let share = self.context_size / MAX_NEW_TOKENS_CTX_SHARE;
+        i32::try_from(share).unwrap_or(i32::MAX).max(DEFAULT_MAX_NEW_TOKENS)
     }
 
     pub fn new(model_path: impl Into<PathBuf>, context_size: u32) -> Self {
@@ -741,7 +757,14 @@ impl LlamaLocalAssistant {
             if let Some((hit_key, entry)) = longest {
                 let restore_started = Instant::now();
                 let restored_bytes = unsafe { ctx.set_state_data(&entry.state) };
-                if restored_bytes == entry.state.len() {
+                // What the checkpoint says it covers has to be what the runtime
+                // actually restored. If it covers more, reading the suffix from
+                // the recorded count would write into positions already filled
+                // and the request would fail outright, so start over cold.
+                let restored_positions = ctx.kv_cache_seq_pos_max(0) + 1;
+                if restored_bytes == entry.state.len()
+                    && restored_positions == i32::try_from(entry.token_count).unwrap_or(i32::MAX)
+                {
                     start = entry.token_count.min(prefix_tokens.len());
                     matched = true;
                     self.cache_counters.record_restore();
@@ -775,7 +798,9 @@ impl LlamaLocalAssistant {
                         layer = layer.as_str(),
                         restored_bytes,
                         state_bytes = entry.state.len(),
-                        "llama.cpp restored a short longest-prefix state; cold-prefilling"
+                        restored_positions,
+                        token_count = entry.token_count,
+                        "llama.cpp restored a state that does not match the checkpoint; cold-prefilling"
                     );
                     ctx = self.new_context(model, "llm.prompt_cache_context_created")?;
                 }
@@ -979,15 +1004,22 @@ impl LlamaLocalAssistant {
             // pre-generation prefix (already checkpointed above), and leaves
             // room for the next turn's framing + generation budget.
             if reusable_len > full_tokens.len()
-                && reusable_len + MAX_NEW_TOKENS as usize <= self.context_size as usize
+                && reusable_len + DEFAULT_MAX_NEW_TOKENS as usize <= self.context_size as usize
             {
                 // Drop KV cells at positions >= reusable_len so the serialized
-                // state covers exactly `reusable_len` positions.
+                // state covers exactly `reusable_len` positions. The runtime
+                // answers whether it could: a model carrying recurrent state
+                // alongside attention cannot roll part of it back, and says so
+                // by returning false. Storing the checkpoint anyway would file
+                // a state covering the whole turn under a shorter token count,
+                // and the next turn would then read its suffix into positions
+                // the restored state already occupies — which the runtime
+                // rejects, failing the request.
                 let truncated = reusable_len == combined.len()
                     || (truncation_safe_for_state_save(reusable_len, combined.len())
                         && ctx
                             .clear_kv_cache_seq(Some(0), Some(reusable_len as u32), None)
-                            .is_ok());
+                            .unwrap_or(false));
                 if truncated {
                     if let Ok(post_state) = copy_context_state(&ctx) {
                         let reusable = &combined[..reusable_len];
@@ -1045,7 +1077,7 @@ impl LlamaLocalAssistant {
         if prefix_tokens.is_empty() {
             return Ok(());
         }
-        if prefix_tokens.len() + MAX_NEW_TOKENS as usize >= self.context_size as usize {
+        if prefix_tokens.len() + DEFAULT_MAX_NEW_TOKENS as usize >= self.context_size as usize {
             debug!(
                 layer = layer.as_str(),
                 tokens = prefix_tokens.len(),
@@ -1107,7 +1139,8 @@ impl LlamaLocalAssistant {
     {
         let guard = self.state.lock().map_err(|_| anyhow!("llama-local mutex poisoned"))?;
         let model = guard.as_ref().ok_or_else(|| anyhow!("llama-local model not loaded"))?;
-        self.run_inference_with_model(model, prompt, MAX_NEW_TOKENS, None, on_delta)
+        let _accelerator = fono_core::gpu_offload::AcceleratorTurn::start();
+        self.run_inference_with_model(model, prompt, DEFAULT_MAX_NEW_TOKENS, None, on_delta)
     }
 
     /// Reply generation with the prefix cache. Only attempts the cached
@@ -1127,6 +1160,7 @@ impl LlamaLocalAssistant {
     {
         let guard = self.state.lock().map_err(|_| anyhow!("llama-local mutex poisoned"))?;
         let model = guard.as_ref().ok_or_else(|| anyhow!("llama-local model not loaded"))?;
+        let _accelerator = fono_core::gpu_offload::AcceleratorTurn::start();
         // Open the capture gate for exactly this turn (we hold the model
         // lock, so generations are serialised and this can't race a
         // concurrent network turn). The RAII guard closes it again on every
@@ -1213,11 +1247,11 @@ impl LlamaLocalAssistant {
         tokenize_span.finish(
             json!({ "prompt_chars": prompt.chars().count(), "prompt_tokens": tokens.len() }),
         );
-        if tokens.len() as u32 + (MAX_NEW_TOKENS as u32) >= self.context_size {
+        if tokens.len() as u32 + (DEFAULT_MAX_NEW_TOKENS as u32) >= self.context_size {
             return Err(anyhow!(
                 "assistant prompt is {} tokens, leaving < {} for generation in a context of {}; raise `[assistant.local].context` or shorten the conversation",
                 tokens.len(),
-                MAX_NEW_TOKENS,
+                DEFAULT_MAX_NEW_TOKENS,
                 self.context_size
             ));
         }
@@ -1436,13 +1470,13 @@ impl LlamaLocalAssistant {
                     ));
                 }
                 let suffix_tokens = full_tokens[prefix_tokens.len()..].to_vec();
-                if prefix_tokens.len() + suffix_tokens.len() + MAX_NEW_TOKENS as usize
+                if prefix_tokens.len() + suffix_tokens.len() + DEFAULT_MAX_NEW_TOKENS as usize
                     >= self.context_size as usize
                 {
                     return Err(anyhow!(
                         "cached prefix plus suffix is {} tokens, leaving < {} for generation in context {}; shorten the prompt or raise context size",
                         prefix_tokens.len() + suffix_tokens.len(),
-                        MAX_NEW_TOKENS,
+                        DEFAULT_MAX_NEW_TOKENS,
                         self.context_size
                     ));
                 }
@@ -1457,7 +1491,7 @@ impl LlamaLocalAssistant {
                 let uncached_output = self.run_inference_with_model(
                     model,
                     &full_prompt,
-                    MAX_NEW_TOKENS,
+                    DEFAULT_MAX_NEW_TOKENS,
                     None,
                     |_| Ok(true),
                 )?;
@@ -1522,7 +1556,7 @@ impl LlamaLocalAssistant {
                     (prefix_tokens.len() + suffix_tokens.len()) as i32,
                     suffix_sample_idx,
                     None,
-                    MAX_NEW_TOKENS,
+                    DEFAULT_MAX_NEW_TOKENS,
                     self.tap().map(Arc::as_ref),
                     // Cache-benchmark path: never railed, so the two arms of the
                     // cached/uncached comparison stay identical in sampling.
@@ -1850,11 +1884,11 @@ impl LlamaLocalAssistant {
         tokenize_span.finish(
             json!({ "prompt_chars": prompt.chars().count(), "prompt_tokens": tokens.len() }),
         );
-        if tokens.len() as u32 + (MAX_NEW_TOKENS as u32) >= self.context_size {
+        if tokens.len() as u32 + (DEFAULT_MAX_NEW_TOKENS as u32) >= self.context_size {
             return Err(anyhow!(
                 "assistant prompt is {} tokens, leaving < {} for generation in a context of {}; raise `[assistant.local].context` or shorten the conversation",
                 tokens.len(),
-                MAX_NEW_TOKENS,
+                DEFAULT_MAX_NEW_TOKENS,
                 self.context_size
             ));
         }
@@ -1913,7 +1947,7 @@ impl LlamaLocalAssistant {
                 tokens.len() as i32,
                 last_prefill_idx,
                 Some(first_token),
-                MAX_NEW_TOKENS,
+                DEFAULT_MAX_NEW_TOKENS,
                 self.tap().map(Arc::as_ref),
                 // Diagnostic replay of a rendered prompt: no tools are offered,
                 // so there is nothing to constrain.
@@ -2591,13 +2625,15 @@ impl Assistant for LlamaLocalAssistant {
             }),
         );
         let me = self.clone_thin();
-        // Per-request generation budget: short-form callers (e.g. notification
-        // summaries) cap the reply well below the global default so a
-        // degenerate run is bounded by seconds, not the full 384-token budget.
+        // Per-request generation budget. A caller that names one gets it —
+        // short-form callers (notification summaries) ask for less, and a
+        // coding client over the HTTP surface asks for much more, because a
+        // model that reasons before it acts needs the room. Truncating such a
+        // reply loses the tool call at the end of it and strands the client.
         let max_new_tokens = ctx
             .max_new_tokens
-            .and_then(|n| i32::try_from(n).ok())
-            .map_or(MAX_NEW_TOKENS, |n| n.clamp(1, MAX_NEW_TOKENS));
+            .map(|n| i32::try_from(n).unwrap_or(i32::MAX))
+            .map_or(DEFAULT_MAX_NEW_TOKENS, |n| n.clamp(1, self.max_new_tokens_ceiling()));
         // Pin this request's prefix only when it genuinely IS the static head —
         // system prompt, areas, devices, tool catalogue and nothing else.
         //
@@ -3244,6 +3280,20 @@ fn env_bool(value: &str) -> Option<bool> {
 mod tests {
     use super::*;
     use crate::history::ChatTurn;
+
+    #[test]
+    fn a_caller_asking_for_a_long_reply_gets_one() {
+        // A coding client reasons before it acts and the tool call sits at the
+        // end of that reasoning, so a reply cut at the spoken-answer default
+        // strands it. Asking must raise the budget, bounded so the prompt
+        // still has room to reach the model.
+        let a = LlamaLocalAssistant::new("/nonexistent.gguf", 20480);
+        assert_eq!(a.max_new_tokens_ceiling(), 5120);
+        // A short context cannot offer a quarter of itself and still beat the
+        // default, and asking must never leave a caller worse off than silence.
+        let small = LlamaLocalAssistant::new("/nonexistent.gguf", 1024);
+        assert_eq!(small.max_new_tokens_ceiling(), DEFAULT_MAX_NEW_TOKENS);
+    }
 
     #[test]
     fn capture_gate_guard_closes_on_drop() {

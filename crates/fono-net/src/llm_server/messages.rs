@@ -197,6 +197,12 @@ pub fn make_context(
             None,
         )
     };
+    // A client that offers tools is an agent: its reply is reasoning followed
+    // by the call it wants run, so a reply cut short loses the call and strands
+    // the loop. When such a client names no budget, let it have whatever the
+    // context allows — the backend bounds that against the room the prompt
+    // needs. A plain chat client keeps the spoken-length default.
+    let max_new_tokens = max_new_tokens.or_else(|| (!tools.is_empty()).then_some(u32::MAX));
     AssistantContext {
         system_prompt,
         history: split.history.clone(),
@@ -409,6 +415,20 @@ mod tests {
     /// wire deserialization and not a hand-built struct.
     fn parse(body: serde_json::Value) -> Vec<WireMessage> {
         serde_json::from_value(body).expect("messages parse")
+    }
+
+    #[test]
+    fn an_agent_that_names_no_reply_length_is_not_held_to_the_spoken_default() {
+        // The defect: a coding client's reply was cut at the spoken-answer
+        // length, losing the tool call at the end of the model's reasoning,
+        // and the client ended the session having been given nothing to run.
+        let split = split_messages(&[msg("user", "hi")]).expect("split");
+        let tools = [serde_json::json!({"function": {"name": "shell", "description": "run"}})];
+        assert_eq!(make_context(&split, None, &tools).max_new_tokens, Some(u32::MAX));
+        // A client that does name one still gets exactly what it asked for,
+        // and a plain chat client keeps the default.
+        assert_eq!(make_context(&split, Some(64), &tools).max_new_tokens, Some(64));
+        assert_eq!(make_context(&split, None, &[]).max_new_tokens, None);
     }
 
     #[test]

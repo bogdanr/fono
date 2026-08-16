@@ -2467,24 +2467,22 @@ function heatClass(rank, total) {
   return 'h' + Math.min(4, Math.floor((rank / (total - 1)) * 4.999));
 }
 
-// Two segments against a budget: the pins first, hatched, then what eviction
-// could actually reclaim. Both budgets count only reclaimable entries, so the
-// pins are drawn *ahead of* the budget rather than inside it — charging them
+// Two segments over one budget: the held prefixes first, hatched, then what
+// eviction could actually reclaim. The budget counts only reclaimable bytes, so
+// the held ones are drawn *ahead of* it rather than inside it — charging them
 // against it would show a bar over half full while the label read 2 of 10.
-function occBar(pinned, used, budget, label, note) {
+function pcBar(pinned, used, budget) {
   const total = (budget + pinned) || 1;
   const pct = (n) => (100 * n / total).toFixed(2) + '%';
-  return '<div class="pc-occ">'
-    + '<div class="pc-occ-hd"><span class="pc-occ-lbl">' + esc(label) + '</span>'
-    + '<span class="hint mono">' + esc(note) + '</span></div>'
-    + '<div class="pc-bar">'
+  return '<div class="pc-bar">'
     + '<span class="pc-seg pin" style="width:' + pct(pinned) + '"></span>'
     + '<span class="pc-seg use" style="width:' + pct(used) + '"></span>'
-    + '</div></div>';
+    + '</div>';
 }
 
 // The layer names are internal (`f8_system`, `f7_context`). Say what each one
-// actually holds; the raw name stays alongside for anyone reading the source.
+// actually holds. The raw name is kept in the row's hover text, not printed
+// beside the translation of itself.
 const PC_LAYER = {
   f8_system: 'assistant instructions',
   f8_chat_prefix: 'conversation',
@@ -2516,49 +2514,27 @@ function cacheChips(c) {
   }
   if (v.stranded_pins) out.push(chip('', v.stranded_pins, plural(v.stranded_pins, 'stranded pin')));
   if (v.orphans) out.push(chip('', v.orphans, 'unplaced'));
-  let verdict = '';
-  if (v.warming) {
-    verdict = 'Nothing has used the cache yet \u2014 this is startup prewarm, so the shape means little.';
-  } else if (v.heads_over_slots) {
-    verdict = 'More live branches than slots (' + c.max_entries + '): they are now evicting each other.';
-  } else if (share >= 50) {
-    verdict = 'Each checkpoint is a whole copy of the prompt before it, so most of the memory'
-      + ' here holds the same tokens over again. That is what limits how many conversations'
-      + ' stay warm at once.';
-  } else if (v.fragmented) {
-    verdict = 'A branch does not descend from any pinned base, so it pays a cold prefill however warm the pins are.';
-  } else if (v.stranded_pins) {
-    verdict = 'A pinned entry has nothing growing off it \u2014 a slot and a blob spent on nothing.';
-  }
-  return '<div class="chips">' + out.join('') + '</div>'
-    + (verdict ? '<p class="hint">' + esc(verdict) + '</p>' : '');
+  return '<div class="chips">' + out.join('') + '</div>';
 }
 
-// Reuse rate is the headline, but a percentage off one or two turns says
-// nothing, so below a real sample we show the raw counts instead of a
-// confident-looking 100%. Zero evictions and zero prunes are the normal,
-// healthy case and not worth a column each; a lost pin never is, so that one is
-// always spelled out.
+// Raw counts, for a reader checking the panel's arithmetic. The rate itself is
+// a tile at the top and a lost base prompt is the headline sentence, so neither
+// is repeated down here as a bare number wanting interpretation. Zero evictions
+// and zero prunes are the normal case and earn no column; a lost base prompt
+// never is, so that one is spelled out either way.
 function cacheCounters(c) {
-  const restores = c.restores || 0, cold = c.cold_prefills || 0;
-  const seen = restores + cold;
   const reasons = Object.entries(c.cold_prefill_reasons || {})
     .map(([k, n]) => n + ' ' + k.replace(/_/g, ' ')).join(', ');
-  const out = [];
-  if (seen >= 5) {
-    out.push('<span><b>' + Math.round(100 * restores / seen) + '%</b> of prompts reused a checkpoint</span>');
-  } else if (seen === 0) {
-    out.push('<span>no prompt has consulted the cache yet</span>');
-  } else {
-    out.push('<span><b>' + restores + ' of ' + seen + '</b> prompts reused a checkpoint'
-      + ' — too few to rate</span>');
+  const out = ['<span><b>' + (c.restores || 0) + '</b> resumed</span>'];
+  if (c.cold_prefills) {
+    out.push('<span><b>' + c.cold_prefills + '</b> started cold'
+      + (reasons ? ' (' + esc(reasons) + ')' : '') + '</span>');
   }
-  if (cold) out.push('<span>' + cold + ' started cold' + (reasons ? ' (' + esc(reasons) + ')' : '') + '</span>');
-  if (c.evictions) out.push('<span>' + c.evictions + ' evicted</span>');
-  if (c.prunes) out.push('<span>' + c.prunes + ' superseded</span>');
+  if (c.evictions) out.push('<span><b>' + c.evictions + '</b> dropped for space</span>');
+  if (c.prunes) out.push('<span><b>' + c.prunes + '</b> replaced by a longer one</span>');
   out.push(c.pin_releases
-    ? '<span class="bad">' + c.pin_releases + ' pinned prefixes lost</span>'
-    : '<span>no pinned prefix lost</span>');
+    ? '<span class="bad"><b>' + c.pin_releases + '</b> base prompts lost</span>'
+    : '<span>no base prompt lost</span>');
   return '<div class="pc-counters mono">' + out.join('') + '</div>' + rereadLine(c);
 }
 
@@ -2585,93 +2561,273 @@ function rereadLine(c) {
     + '</li>').join('');
   // The summary has to carry the answer, not just the total. A bare count
   // behind a closed triangle reads as a footnote and gets scanned past — and
-  // the cause is the whole point of counting. Named inline, and opened on
-  // arrival when a dropped checkpoint is implicated, because that is the one
-  // worth acting on.
+  // the cause is the whole point of counting. A dropped checkpoint is the one
+  // worth acting on, so it is named here and again in the panel's headline.
   const dropped = by.eviction || 0;
   const head = dropped
     ? '<b>' + dropped.toLocaleString() + '</b> of ' + total.toLocaleString()
       + ' tokens were read a second time because a saved conversation had been dropped'
     : total.toLocaleString() + ' tokens have been read a second time \u2014 '
       + esc(PC_REREAD[rows[0][0]] || rows[0][0].replace(/_/g, ' '));
-  return '<details class="pc-reread' + (dropped ? ' bad' : '') + '"' + (dropped ? ' open' : '')
-    + '><summary>' + head + '</summary><ul>' + items + '</ul>'
-    + '<p class="hint">Only the dropped-conversation line is work that keeping'
-    + ' saved conversations on disk could have saved. The rest would have been read'
-    + ' again whatever was stored.</p></details>';
+  return '<details class="pc-reread' + (dropped ? ' bad' : '') + '">'
+    + '<summary>' + head + '</summary><ul>' + items + '</ul>'
+    // Only worth saying when there is such a line to point at. Naming it
+    // unconditionally sent the reader hunting up the list for an entry that
+    // was not there.
+    + '<p class="hint">' + (dropped
+      ? 'Only the dropped-conversation line is work that keeping saved conversations on disk'
+        + ' could have saved. The rest would have been read again whatever was stored.'
+      : 'None of this is work that keeping saved conversations on disk would have saved \u2014'
+        + ' it would all have been read again whatever was stored.')
+    + '</p></details>';
 }
 
-function cacheRow(n, total) {
-  const doomed = n.evicts_in === 1;
+// The words that tell one entry from another, cleaned of the template markers
+// the model reads and nobody else should have to see. Entries on a branch all
+// open with the same instructions — which is why the daemon abridges a prompt
+// head-and-tail rather than truncating it — so a child shows its tail, what it
+// actually added, and only a root, which is all opening, shows its head.
+// Printing the head of every row put one identical system prompt down the whole
+// tree and told the reader nothing about any of them.
+// A row's `+N tok` says what the entry added, so the line beneath it should say
+// the same thing in words. The daemon stores an abridged copy of each whole
+// prompt rather than of the difference between two, and at a six-token delta
+// the tail of the whole prompt is almost entirely the parent's — the same
+// sentences printed again one row further down. A child's prompt opens with its
+// parent's, so whatever follows the parent's last words is what the child
+// added, and that is what the row shows.
+function pcAdded(child, parent) {
+  const anchor = parent.slice(-40);
+  if (anchor.length < 8) return null;
+  // Last occurrence: a short anchor can repeat earlier in a conversation that
+  // circles back on itself, and only the final one is the true seam.
+  const at = child.lastIndexOf(anchor);
+  if (at < 0) return null;
+  const added = child.slice(at + anchor.length);
+  return added.trim() ? added : null;
+}
+
+// `fromStart` reads the opening rather than the ending. What an entry added is
+// short and wants reading from its first word; a whole prompt is long and only
+// its last words tell it from the entry above.
+function pcPreview(text, fromStart) {
+  const cut = text.lastIndexOf('[\u2026]');
+  const s = (cut >= 0 && !fromStart ? text.slice(cut + 3) : text)
+    // The template's turn markers, and the role word each one introduces.
+    // Removing the marker by itself stranded `user` and `model` mid-sentence,
+    // where they read as words somebody had said rather than as the seam
+    // between two turns. A separator says the same thing and cannot be misread.
+    .replace(/<\|?[a-z_]+\|?>\s*(?:user|model|assistant|system|tool)?/gi, ' \u00b7 ')
+    .replace(/\s+/g, ' ')
+    // One turn closes and the next opens with two markers back to back, which
+    // left two separators back to back. One seam, one mark.
+    .replace(/(?:\u00b7 ){2,}/g, '\u00b7 ')
+    .replace(/^[\s\u00b7]+|[\s\u00b7]+$/g, '');
+  if (s.length <= 150) return s;
+  return fromStart
+    ? s.slice(0, 150) + '\u2026'
+    : '\u2026 ' + s.slice(-150).replace(/^[\s\u00b7]+/, '');
+}
+
+// The rows arrive depth-first, so the parent of any row is the nearest row
+// above it one level shallower. Tracking that on the way down costs nothing and
+// lets a row subtract its parent without the cache's own keys ever entering the
+// page.
+function cacheTree(nodes, total) {
+  const above = [];
+  return '<div class="pc-tree">' + nodes.map((n) => {
+    above.length = n.depth;
+    const row = cacheRow(n, total, n.depth ? above[n.depth - 1] : null);
+    above[n.depth] = n;
+    return row;
+  }).join('') + '</div>';
+}
+
+function cacheRow(n, total, parent) {
   const cls = ['pc-node', heatClass(n.lru_rank, total)];
   if (n.pinned) cls.push('pinned');
-  if (doomed) cls.push('doomed');
+  if (n.evicts_in === 1) cls.push('doomed');
   const tokens = n.parent ? '+' + n.delta_tokens : String(n.tokens);
-  const fate = n.pinned ? 'pinned' : n.evicts_in === 1 ? 'out next' : 'out #' + n.evicts_in;
-  // The prompt itself, not its fingerprint. A hash identifies an entry to the
-  // cache and to nobody else; what a reader wants to know is which
-  // conversation this is.
-  const head = (PC_LAYER[n.layer] || n.layer) + ' \u00b7 ' + n.tokens + ' tokens \u00b7 '
-    + fmtMiB(n.bytes);
-  const title = n.preview
-    ? head + '\n\n' + n.preview
-    : head + (n.parent ? '\nextends ' + n.parent : '\nno cached ancestor');
+  // Only the two states anyone can act on. The full eviction order was a column
+  // of `out #3 / out #4 / out #2` down rows sorted by something else, asking the
+  // reader to re-sort the tree in their head to learn a number they cannot
+  // change. It moves to the hover text.
+  const fate = n.pinned ? 'held' : n.evicts_in === 1 ? 'next to go' : '';
+  const order = n.pinned ? 'held, never dropped'
+    : n.evicts_in === 1 ? 'first to be dropped'
+      : 'number ' + n.evicts_in + ' to be dropped';
   const name = PC_LAYER[n.layer] || n.layer;
+  // What this entry added, when its parent is on screen to subtract; the whole
+  // prompt otherwise. A root has no parent and is all opening, so it reads from
+  // its first word, and so does an added fragment, which is short.
+  const added = n.preview && parent && parent.preview ? pcAdded(n.preview, parent.preview) : null;
+  const line = added || n.preview;
+  const fromStart = !!added || !n.parent;
+  // No entry id and no parent id. Those are keys the cache looks entries up by;
+  // they name an entry to nobody else, and the tree already says which entry
+  // builds on which by indenting it. In the hover text they read as something
+  // meaningful the reader had failed to understand.
+  const title = name + ' (' + n.layer + ') \u00b7 ' + n.tokens + ' tokens \u00b7 ' + fmtMiB(n.bytes)
+    + '\n' + order + (n.parent ? '' : '\nbuilt on nothing cached, so it starts cold')
+    + (n.preview ? '\n\n' + n.preview : '');
   return '<div class="' + cls.join(' ') + '" style="--d:' + n.depth + '" title="' + esc(title) + '">'
-    + '<span class="pc-name">' + (n.pinned ? '\u25c9 ' : '') + esc(name)
-    + ' <span class="pc-raw mono">' + esc(n.layer) + '</span></span>'
+    + '<span class="pc-name">' + (n.pinned ? '\u25c9 ' : '') + esc(name) + '</span>'
     + '<span class="pc-tok mono">' + esc(tokens) + ' tok</span>'
     + '<span class="pc-by mono">' + esc(fmtMiB(n.bytes)) + '</span>'
     + '<span class="pc-when">' + esc(fmtIdle(n.idle_secs)) + '</span>'
-    + '<span class="pc-fate mono">' + esc(fate) + '</span>'
+    + '<span class="pc-fate">' + esc(fate) + '</span>'
+    // The words on the row rather than behind a hover. They are the one thing
+    // that says *which* conversation this is, and hover text puts them out of
+    // reach of touch and of a screen reader alike.
+    + (line ? '<span class="pc-prev">' + esc(pcPreview(line, fromStart)) + '</span>' : '')
     + '</div>';
 }
 
-// A budget in megabytes means nothing on its own: the same 1.3 GiB is room for
-// three conversations on a small model and not one on a large one. The budget
-// is set as a multiple of what one conversation costs, so say it that way.
-function checkpointLine(c) {
+// One severity and one sentence, decided in a single place. The panel used to
+// form its opinion twice — a reuse rate in the counters strip, a shape verdict
+// under the chips — and lead with neither, opening instead on a fingerprint.
+// Faults rank by what they cost, so the sentence names the most expensive true
+// thing and stops.
+function cacheVerdict(c) {
+  const v = c.verdicts, n = c.counters || {};
+  const restores = n.restores || 0, seen = restores + (n.cold_prefills || 0);
+  const dropped = (n.reread_prefix_tokens || {}).eviction || 0;
+  // Every memory fault here has the same remedy, and it is not a setting: the
+  // budget is worked out from free RAM and from what one conversation costs.
+  const act = 'The size of the cache is not a setting — free some memory, or keep'
+    + ' conversations shorter, and it will hold more.';
+  if (v.warming || !seen) {
+    return { level: 'info', line: 'Warming up \u2014 nothing has asked the cache for anything yet.' };
+  }
+  if (n.pin_releases) {
+    return {
+      level: 'fail', act,
+      line: 'A base prompt was dropped ' + n.pin_releases + ' time'
+        + (n.pin_releases === 1 ? '' : 's') + ', so everything built on it had to be read'
+        + ' again from the start.',
+    };
+  }
+  if (v.heads_over_slots) {
+    return {
+      level: 'fail', act,
+      line: 'More conversations are live than there are slots to hold them ('
+        + c.max_entries + '), so they are pushing each other out.',
+    };
+  }
+  if (dropped) {
+    return {
+      level: 'warn', act,
+      line: dropped.toLocaleString() + ' tokens had to be read a second time, because what'
+        + ' was saved of that conversation was dropped to stay inside the memory budget.',
+    };
+  }
+  if (v.fragmented) {
+    return {
+      level: 'warn',
+      line: 'A conversation is not built on any held base prompt, so it pays full price to'
+        + ' start however warm the rest of the cache is.',
+    };
+  }
+  if (seen < 5) {
+    return {
+      level: 'info',
+      line: restores + ' of ' + seen + (seen === 1 ? ' prompt' : ' prompts')
+        + (restores === 1 ? ' has' : ' have')
+        + ' carried on from a saved conversation \u2014 too few so far to judge.',
+    };
+  }
+  const rate = Math.round(100 * restores / seen);
+  return rate >= 60
+    ? {
+      level: 'ok',
+      line: 'Resuming well \u2014 ' + rate + '% of prompts carried on from a saved conversation'
+        + ' instead of reading it again.',
+    }
+    : {
+      level: 'warn', act,
+      line: 'Only ' + rate + '% of prompts carried on from a saved conversation; the rest'
+        + ' were read from the beginning.',
+    };
+}
+
+// Three numbers, in the order the questions actually get asked: is it working,
+// what is it costing, how much fits. Two full-width meters, six chips and a
+// counters strip used to hold this space and answer none of the three at a
+// glance.
+function pcTiles(c) {
+  const n = c.counters || {};
+  const restores = n.restores || 0, seen = restores + (n.cold_prefills || 0);
+  const held = c.nodes.length + c.unplaced.length;
   const one = c.checkpoint_bytes || 0;
-  if (!one) return '';
-  const room = Math.floor(c.max_bytes / one);
-  const note = room >= 1
-    ? 'room for ' + room + (room === 1 ? ' conversation' : ' conversations')
-    : 'not enough for even one — the cache is off until the context is shorter';
-  return '<p class="hint">One saved conversation costs ' + esc(fmtMiB(one)) + ' at this'
-    + ' context: ' + esc(note) + '.</p>';
+  const room = one ? Math.floor(c.max_bytes / one) : null;
+  const tile = (val, sub, extra) => '<div class="pc-tile"><div class="pc-val">' + val + '</div>'
+    + '<div class="pc-sub">' + sub + '</div>' + (extra || '') + '</div>';
+  return '<div class="pc-tiles">'
+    // A percentage off one or two turns is a confident-looking number standing
+    // on nothing, and it sat next to a headline saying so. Below a real sample
+    // the tile shows the count it actually has.
+    + tile(seen >= 5 ? Math.round(100 * restores / seen) + '%'
+      : seen ? restores + ' of ' + seen : '\u2014',
+    seen >= 5 ? 'of prompts resumed' : seen ? 'prompts resumed so far' : 'nothing asked yet')
+    + tile(esc(fmtMiB(c.bytes_resident)),
+      'in use of ' + esc(fmtMiB(c.max_bytes)) + ' \u00b7 ' + held + ' of '
+      + (c.max_entries + c.entries_pinned) + ' slots',
+      pcBar(c.bytes_pinned, c.bytes_evictable, c.max_bytes))
+    + tile(room === null ? '\u2014' : room,
+      room === null ? 'no model loaded yet'
+        : room === 0 ? 'fit \u2014 too little memory for one'
+          : room === 1 ? 'conversation kept warm' : 'conversations kept warm')
+    + '</div>';
+}
+
+// Worth reading once, noise on every visit after, so it folds. It also has to
+// reconcile the two figures that read as a contradiction when they sat one
+// under the other: a few megabytes in use, beneath a per-conversation cost of a
+// few hundred.
+function pcExplain(c) {
+  const one = c.checkpoint_bytes || 0;
+  const room = one ? Math.floor(c.max_bytes / one) : 0;
+  return '<details class="pc-more"><summary>What these numbers mean</summary>'
+    + (one
+      ? '<p class="hint">A conversation grows as you talk, so what is in use now is a fraction'
+        + ' of what one will cost by the end. Run to the full context length, one costs '
+        + esc(fmtMiB(one)) + ' \u2014 ' + (room >= 1 ? 'room for ' + room + ' at a time'
+          : 'more than the whole budget, so nothing is kept until conversations are shorter')
+        + '.</p>'
+      : '')
+    + '<p class="hint">Every entry is a complete copy of the model\u2019s state at that point,'
+    + ' never a link in a chain, which is what makes it safe to drop any one of them. A deeper'
+    + ' entry therefore repeats everything above it, and that repetition is most of what the'
+    + ' memory holds. It is the price of being able to drop any single entry, and it is what'
+    + ' limits how many conversations stay warm at once.</p>'
+    + '<p class="hint">The size of the cache is not a setting. It is worked out from the memory'
+    + ' free on this machine and from what one conversation costs on the loaded model.</p>'
+    + '</details>';
+}
+
+// Everything a reader might want and nobody needs on arrival: the shape of the
+// tree, the raw counters, and the entries only an identical prompt can reach.
+function pcDetails(c, total) {
+  const u = c.unplaced.length;
+  return '<details class="pc-more"><summary>Detailed counters</summary>'
+    + cacheChips(c) + cacheCounters(c.counters)
+    + (u
+      ? '<p class="hint">' + u + (u === 1 ? ' entry is' : ' entries are') + ' reachable by exact'
+        + ' match only: they recorded no tokens, so a prompt that merely extends them cannot'
+        + ' find them.</p>'
+        + '<div class="pc-tree">' + c.unplaced.map((x) => cacheRow(x, total, null)).join('') + '</div>'
+      : '')
+    + '</details>';
 }
 
 function cacheBody(c) {
   const total = c.nodes.length + c.unplaced.length;
-  // The slot line has to reconcile with the tree below it, which shows every
-  // entry. Reporting only the reclaimable count against the budget left a
-  // "2 of 10" sitting above four rows.
-  let out = occBar(c.entries_pinned, c.entries_evictable, c.max_entries, 'slots',
-    total + (total === 1 ? ' entry' : ' entries') + ' \u00b7 ' + c.entries_pinned
-    + ' pinned \u00b7 ' + c.entries_evictable + ' of ' + c.max_entries + ' reclaimable slots');
-  out += occBar(c.bytes_pinned, c.bytes_evictable, c.max_bytes, 'memory',
-    fmtMiB(c.bytes_resident) + ' held \u00b7 ' + fmtMiB(c.bytes_pinned) + ' pinned \u00b7 '
-    + fmtMiB(c.bytes_evictable) + ' of ' + fmtMiB(c.max_bytes) + ' reclaimable budget');
-  out += checkpointLine(c);
-  out += cacheChips(c);
-  out += cacheCounters(c.counters);
-  if (!c.nodes.length && !c.unplaced.length) {
-    out += '<p class="hint">Nothing cached yet. The base prompts are stored when the model'
-      + ' first loads, and branches appear as you talk to it.</p>';
-    return out;
+  const out = pcTiles(c);
+  if (!total) {
+    return out + '<p class="hint">Nothing cached yet. The base prompts are stored when the model'
+      + ' first loads, and conversations appear as you talk to it.</p>' + pcExplain(c);
   }
-  out += '<div class="pc-tree">' + c.nodes.map((n) => cacheRow(n, total)).join('') + '</div>';
-  if (c.unplaced.length) {
-    out += '<details class="pc-unplaced"><summary>' + c.unplaced.length
-      + ' reachable by exact match only</summary>'
-      + '<div class="pc-tree">' + c.unplaced.map((n) => cacheRow(n, total)).join('') + '</div>'
-      + '<p class="hint">These recorded no tokens, so a prompt that merely extends them'
-      + ' cannot find them \u2014 only an identical one can.</p></details>';
-  }
-  out += '<p class="privacy-note">Every entry is a complete copy of the model\u2019s state at'
-    + ' that point, never a link in a chain, which is what makes it safe to drop any one of'
-    + ' them. A deeper entry therefore repeats everything above it.</p>';
-  return out;
+  return out + cacheTree(c.nodes, total) + pcExplain(c) + pcDetails(c, total);
 }
 
 function renderCache() {
@@ -2702,8 +2858,15 @@ function renderCache() {
       + ' \u2014 a cloud provider holds no state here.</p>';
   } else {
     const c = list.find((x) => x.role === cacheRole) || list[0];
+    const vd = cacheVerdict(c);
     body = '<section class="sec"><div class="body">'
-      + '<p class="hint mono">' + esc(c.model) + ' \u00b7 runtime ' + esc(c.runtime) + '</p>'
+      + '<div class="pc-lead"><span class="sev ' + esc(vd.level) + '"></span>'
+      + '<p>' + esc(vd.line)
+      + (vd.act ? '<span class="hint">' + esc(vd.act) + '</span>' : '') + '</p></div>'
+      // The model, quietly, under the sentence. The runtime fingerprint
+      // identifies a build to nobody outside this repository, so it goes in
+      // the hover text rather than opening the panel.
+      + '<p class="pc-model" title="runtime ' + esc(c.runtime) + '">' + esc(c.model) + '</p>'
       + cacheBody(c) + '</div></section>';
   }
   el.innerHTML = bar + body;

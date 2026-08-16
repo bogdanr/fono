@@ -214,6 +214,9 @@ pub fn shared_model_sized(
     match shared_model(path, &params) {
         Ok(model) => {
             info!("offload: {}", decision.explanation);
+            if let Some(device) = &decision.device {
+                crate::gpu_offload::note_accelerator_in_use(device);
+            }
             Ok(model)
         }
         // The estimate said it fits and the device disagreed. One retry on the

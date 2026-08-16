@@ -53,6 +53,8 @@ const DESKTOP_RESERVE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 pub struct OffloadDecision {
     /// Layers to hand llama.cpp. `0` keeps the model on the host.
     pub n_gpu_layers: u32,
+    /// The device the layers are going to, when they are going anywhere.
+    pub device: Option<String>,
     /// One line naming the device and the numbers behind the answer, for logs
     /// and diagnostics.
     pub explanation: String,
@@ -60,7 +62,7 @@ pub struct OffloadDecision {
 
 impl OffloadDecision {
     fn host_only(explanation: String) -> Self {
-        Self { n_gpu_layers: 0, explanation }
+        Self { n_gpu_layers: 0, device: None, explanation }
     }
 }
 
@@ -77,6 +79,12 @@ pub fn decide(
     type_k: KvCacheType,
     type_v: KvCacheType,
 ) -> OffloadDecision {
+    if let Some(device) = crashed_last_run() {
+        return OffloadDecision::host_only(format!(
+            "{device} stopped responding during the previous reply and took Fono down with it; \
+             running on the CPU this time. Restart to try the device again."
+        ));
+    }
     let Some(device) = target_device() else {
         return OffloadDecision::host_only("no accelerator registered".to_string());
     };
@@ -102,7 +110,11 @@ pub fn decide(
     );
     // `n_layer + 1` is the output layer on top of the repeating blocks, which
     // is how llama.cpp counts a full offload.
-    OffloadDecision { n_gpu_layers: if fits { shape.n_layer() + 1 } else { 0 }, explanation }
+    OffloadDecision {
+        n_gpu_layers: if fits { shape.n_layer() + 1 } else { 0 },
+        device: fits.then(|| device.description.clone()),
+        explanation,
+    }
 }
 
 /// Bytes the KV cache of the model at `model_path` occupies at `n_ctx` tokens.
@@ -133,6 +145,103 @@ fn target_device() -> Option<GgmlDevice> {
     let all = devices();
     let pick = |kind: GgmlDeviceKind| all.iter().find(|d| d.kind == kind).cloned();
     pick(GgmlDeviceKind::Gpu).or_else(|| pick(GgmlDeviceKind::IGpu))
+}
+
+// A graphics driver that decides a submitted job has taken too long resets the
+// device out from under us. Vulkan reports that as a lost device, llama.cpp
+// turns it into a C++ exception, and the exception crosses the FFI boundary
+// where Rust cannot catch it — so the whole process aborts, taking dictation
+// and the tray down with a reply. Observed on an Intel iGPU whose driver kills
+// any job running longer than five seconds, which a large model reading a
+// coding-sized prompt exceeds.
+//
+// Nothing can be caught, so nothing is tried. Instead a file records that a
+// reply was running on the device, and its survival across a restart is the
+// evidence that the device killed us. The next run then stays on the CPU, which
+// is slower and works. The record is consumed when read, so one bad run costs
+// exactly one CPU-only run — including when the marker is left by an ordinary
+// kill mid-reply, which is indistinguishable from the crash and rare enough
+// that erring towards the working configuration is the right trade.
+
+/// Where the in-flight marker lives. `None` when the state directory cannot be
+/// resolved, which disables the guard rather than failing the load.
+fn in_flight_marker() -> Option<std::path::PathBuf> {
+    crate::paths::Paths::resolve().ok().map(|p| p.state_dir.join("accelerator-in-flight"))
+}
+
+/// Hide the graphics device from llama.cpp for the rest of this run, when the
+/// previous run died on it. Must be called before anything touches llama.cpp,
+/// because the device list is built once, on first use.
+///
+/// Keeping the layers on the CPU is not enough on its own. Measured on an Intel
+/// iGPU: a model loaded with no layers on the device still had llama.cpp split
+/// the work 695 ways and reserve a 1.3 GB buffer on it, and a long prompt still
+/// killed the process. Only removing the device stops that, and llama.cpp reads
+/// this variable before it enumerates.
+pub fn quarantine_crashed_accelerator() {
+    if crashed_last_run().is_some() {
+        std::env::set_var("GGML_VK_VISIBLE_DEVICES", "");
+    }
+}
+
+/// The device that took the process down last time, read once per process.
+fn crashed_last_run() -> Option<&'static str> {
+    static LAST: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    LAST.get_or_init(|| {
+        let path = in_flight_marker()?;
+        let device = std::fs::read_to_string(&path).ok()?;
+        let _ = std::fs::remove_file(&path);
+        let device = device.trim();
+        (!device.is_empty()).then(|| device.to_string())
+    })
+    .as_deref()
+}
+
+/// Record that a reply is being generated on `device`, so an abort mid-reply
+/// leaves evidence behind. Paired with [`accelerator_idle`].
+fn accelerator_busy(device: &str) {
+    let Some(path) = in_flight_marker() else { return };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, device);
+}
+
+/// Record that the reply finished without the device killing us.
+fn accelerator_idle() {
+    if let Some(path) = in_flight_marker() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Remember that a model did load onto `device`, so replies know they are at
+/// risk. Called by [`crate::llama_backend::shared_model_sized`] on success.
+pub fn note_accelerator_in_use(device: &str) {
+    let _ = IN_USE.set(device.to_string());
+}
+
+static IN_USE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Marks a reply as running on the accelerator for as long as it is held, and
+/// clears the mark on every exit path. Does nothing when no model is on a
+/// device, so callers need not check.
+pub struct AcceleratorTurn(bool);
+
+impl AcceleratorTurn {
+    #[must_use]
+    pub fn start() -> Self {
+        let Some(device) = IN_USE.get() else { return Self(false) };
+        accelerator_busy(device);
+        Self(true)
+    }
+}
+
+impl Drop for AcceleratorTurn {
+    fn drop(&mut self) {
+        if self.0 {
+            accelerator_idle();
+        }
+    }
 }
 
 /// How much of the device we are willing to fill.
@@ -579,6 +688,28 @@ mod tests {
         }
         let per_token = shape(blocks).kv_bytes(1, KvCacheType::F16, KvCacheType::F16);
         assert_eq!(per_token, 20_480, "20 KB a token");
+    }
+
+    #[test]
+    fn a_reply_on_the_host_leaves_no_crash_evidence() {
+        // The marker exists to catch a device that kills the process, so it
+        // must not be written when there is no device — otherwise an ordinary
+        // kill during a CPU reply would quarantine an accelerator that was
+        // never at fault.
+        let marker = in_flight_marker().expect("the state directory resolves under test");
+        let before = marker.exists();
+        drop(AcceleratorTurn::start());
+        assert_eq!(marker.exists(), before, "a host-only reply must not touch the marker");
+    }
+
+    #[test]
+    fn a_host_only_decision_names_no_device() {
+        // `device` is what arms the crash guard, so a decision that keeps the
+        // model on the CPU must leave it empty or every CPU reply would be
+        // marked as at risk.
+        let decision = OffloadDecision::host_only("nothing to offload to".to_string());
+        assert!(decision.device.is_none());
+        assert_eq!(decision.n_gpu_layers, 0);
     }
 
     #[test]

@@ -84,29 +84,46 @@ section.sec {
   background: var(--card); padding: 16px 18px; margin-bottom: 10px;
 }
 .pc-tabs { display: flex; gap: 6px; }
-.pc-occ { margin: 0 0 14px; }
-.pc-occ-hd { display: flex; align-items: baseline; gap: 10px; margin-bottom: 5px; }
-.pc-occ-lbl { font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--ink-dim); }
+/* The panel opens on a sentence, so the sentence gets body-copy size and the
+   dot beside it is the only thing on the page allowed to be red before
+   something is actually wrong. */
+.pc-lead { display: flex; align-items: baseline; gap: 9px; }
+.pc-lead p { margin: 0; font-size: 15px; line-height: 1.45; }
+.pc-lead .hint { display: block; margin-top: 4px; font-size: 12.5px; }
+.pc-model { color: var(--ink-dim); font-size: 11.5px; margin: 3px 0 16px 17px; }
+.pc-tiles { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
+.pc-tile {
+  flex: 1 1 148px; background: var(--bg-2); border: 1px solid var(--line);
+  border-radius: 8px; padding: 11px 13px;
+}
+.pc-val { font-size: 22px; line-height: 1.15; }
+.pc-sub { color: var(--ink-mute); font-size: 11.5px; margin-top: 2px; }
 .pc-bar {
-  display: flex; height: 10px; border-radius: 5px; overflow: hidden;
+  display: flex; height: 6px; border-radius: 3px; overflow: hidden; margin-top: 9px;
   background: var(--bg); border: 1px solid var(--line);
 }
 .pc-seg { height: 100%; }
-/* Pins are hatched rather than merely a different colour: they are the one
-   thing on the bar the user cannot reclaim, and that is worth reading without
-   consulting a key. They also sit outside the budget, so the bar shows them
-   ahead of it rather than eating into it. */
+/* Held prefixes are hatched rather than merely a different colour: they are the
+   one thing on the bar the user cannot reclaim, and that is worth reading
+   without consulting a key. They also sit outside the budget, so the bar shows
+   them ahead of it rather than eating into it. */
 .pc-seg.pin {
   background: repeating-linear-gradient(135deg,
     var(--ink-dim) 0 3px, transparent 3px 6px), var(--bg-3);
 }
-.pc-seg.use { background: var(--accent); }
+/* Neutral, never the accent. The bar fills in normal operation, and a meter
+   that goes red when nothing is wrong teaches the reader to ignore the one
+   that goes red when something is. */
+.pc-seg.use { background: var(--ink-mute); }
+.pc-more { margin: 12px 0 2px; }
+.pc-more summary { cursor: pointer; font-size: 12.5px; color: var(--ink-mute); }
+.pc-more > p { margin: 8px 0; }
 .pc-counters { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 11.5px; color: var(--ink-mute); margin: 12px 0 4px; }
 .pc-counters b { color: var(--ink); }
 .pc-counters .bad { color: var(--warn); }
 .pc-tree { margin: 14px 0 6px; }
 .pc-node {
-  display: flex; align-items: baseline; gap: 10px; font-size: 12px;
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; font-size: 12px;
   padding: 5px 8px 5px calc(8px + var(--d) * 20px);
   border-left: 3px solid var(--ink-mute); border-radius: 0 4px 4px 0;
 }
@@ -125,14 +142,18 @@ section.sec {
 .pc-node.pinned { background: var(--accent-soft); border-left-color: var(--accent); }
 .pc-node.doomed .pc-fate { color: var(--warn); }
 .pc-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pc-raw { color: var(--ink-dim); font-size: 11px; }
+/* The first words of the prompt, on its own line under the row. It was hover
+   text only, which put the one thing identifying *which* conversation a row is
+   out of reach of touch and of a screen reader alike. */
+.pc-prev {
+  flex-basis: 100%; color: var(--ink-dim); font-size: 11px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .pc-tok, .pc-by { color: var(--ink-mute); text-align: right; }
 .pc-tok { width: 78px; }
 .pc-by { width: 68px; }
 .pc-when { width: 76px; text-align: right; color: var(--ink-dim); font-size: 11px; }
 .pc-fate { width: 84px; text-align: right; color: var(--ink-dim); font-size: 11px; }
-.pc-unplaced { margin: 10px 0; }
-.pc-unplaced summary { cursor: pointer; font-size: 12px; color: var(--ink-mute); }
 .pc-reread { margin: 4px 0 10px; }
 .pc-reread summary { cursor: pointer; font-size: 12px; color: var(--ink-mute); }
 .pc-reread ul { margin: 6px 0 4px; padding-left: 20px; font-size: 12px; color: var(--ink-mute); }

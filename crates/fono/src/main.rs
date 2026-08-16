@@ -41,6 +41,12 @@ fn main() -> Result<()> {
     // the console attach.
     fono_core::vulkan_probe::run_subprocess_probe_if_requested();
 
+    // If the graphics device killed the previous run mid-reply, take it
+    // away before llama.cpp can enumerate it. Has to happen this early:
+    // the device list is built once, on first use, and putting the model
+    // on the CPU afterwards does not keep llama.cpp off the device.
+    fono_core::gpu_offload::quarantine_crashed_accelerator();
+
     // GUI-subsystem binaries start with no std handles; if we were
     // launched from a terminal, reconnect to it so CLI output appears.
     // No-op (and windowless) when there is no parent console.

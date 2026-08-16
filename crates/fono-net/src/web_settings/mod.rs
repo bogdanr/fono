@@ -1174,13 +1174,133 @@ mod tests {
         assert!(APP_JS.contains("'#/cache'"), "and a route that recognises it");
         assert!(APP_JS.contains("href=\"#/cache\""), "and a way in from the health report");
         assert!(APP_JS.contains("/api/promptcache"), "and the endpoint it reads");
-        assert!(APP_JS.contains("out next"), "which entry falls out next");
+        assert!(APP_JS.contains("next to go"), "which entry falls out next");
         assert!(APP_JS.contains("pinned"), "and which prefixes are held");
         assert!(APP_CSS.contains(".pc-node"), "the tree needs its own styling");
         // Both read straight off the serialized snapshot, so a rename on the
         // Rust side would blank them silently rather than fail to compile.
         assert!(APP_JS.contains("checkpoint_bytes"), "what one conversation costs");
         assert!(APP_JS.contains("reread_prefix_tokens"), "and why tokens were read twice");
+    }
+
+    /// The panel opens on a sentence saying whether the cache is doing its job.
+    ///
+    /// It used to open on a build fingerprint and then stack two meters, six
+    /// chips, a counters strip and three paragraphs at equal weight, so a
+    /// reader who only wanted to know whether anything was wrong had to work
+    /// it out. One function decides that now, and nothing may render above it.
+    #[test]
+    fn the_prompt_cache_panel_leads_with_a_verdict() {
+        assert!(APP_JS.contains("function cacheVerdict("), "one place forms the opinion");
+        let body = APP_JS.split_once("function renderCache(").expect("the panel still renders").1;
+        let lead = body.find("pc-lead").expect("the verdict must be rendered");
+        for below in ["pc-tiles", "pc-tree", "pc-more"] {
+            assert!(
+                body.find(below).is_none_or(|at| at > lead),
+                "`{below}` renders above the verdict sentence"
+            );
+        }
+    }
+
+    /// The internal layer id must not be printed in a tree row.
+    ///
+    /// Every row carried `f8_system` / `history_prefix` in grey directly beside
+    /// the plain-English name the panel had already translated it into — the
+    /// one cost to the reader's eye this panel could least afford, on the page
+    /// whose whole job is to be legible. The id stays in the row's hover text,
+    /// where someone reading the cache source can still find it.
+    #[test]
+    fn a_tree_row_does_not_print_the_internal_layer_id() {
+        assert!(APP_JS.contains("PC_LAYER"), "the panel still translates layer ids");
+        assert!(
+            !APP_JS.contains("pc-raw"),
+            "a tree row is printing the raw layer id again; it belongs in the row's title"
+        );
+    }
+
+    /// Every `pc-*` class the prompt-cache panel paints on itself must exist
+    /// in the stylesheet.
+    ///
+    /// The panel says most of what it says through layout and colour — a
+    /// status dot, a tile, a held row, the row that goes next. A class name
+    /// that has drifted breaks none of that loudly; the panel just quietly
+    /// stops saying the thing. Same guard the actions page already carries,
+    /// on the page that was rebuilt around exactly this vocabulary.
+    #[test]
+    fn every_prompt_cache_class_is_styled() {
+        let mut wanted: Vec<String> = Vec::new();
+        for (at, _) in APP_JS.match_indices("pc-") {
+            // Only names as they are written into markup: a quote or a space
+            // opens a class. Anything else is prose or a `data-` attribute.
+            if !matches!(APP_JS[..at].chars().next_back(), Some('"' | '\'' | ' ')) {
+                continue;
+            }
+            let rest = &APP_JS[at..];
+            let end =
+                rest.find(|c: char| !(c.is_ascii_lowercase() || c == '-')).unwrap_or(rest.len());
+            let name = rest[..end].trim_end_matches('-');
+            if name.len() > 3 {
+                wanted.push(name.to_owned());
+            }
+        }
+        wanted.sort();
+        wanted.dedup();
+        // The scan going blind is the failure mode that would leave this test
+        // passing forever while checking nothing.
+        assert!(wanted.len() > 8, "found only {wanted:?} — the scan has stopped seeing the panel");
+
+        // Boundary-aware: `.pc-tile` must not be satisfied by `.pc-tiles`.
+        for c in &wanted {
+            assert!(
+                APP_CSS.match_indices(&format!(".{c}")).any(|(at, m)| {
+                    APP_CSS[at + m.len()..]
+                        .chars()
+                        .next()
+                        .is_none_or(|n| !(n.is_ascii_alphanumeric() || n == '-' || n == '_'))
+                }),
+                "app.js paints `{c}` on the prompt-cache panel but app.css never styles it"
+            );
+        }
+    }
+
+    /// A row must preview what tells its entry apart, not what every entry
+    /// shares.
+    ///
+    /// `fono_core::prompt_cache` abridges a prompt head-and-tail rather than
+    /// truncating it, for the stated reason that entries on one branch all
+    /// open with the same instructions. A row that printed the head rendered
+    /// one identical system prompt down the whole tree; a row that printed the
+    /// tail then disagreed with its own `+N tok`, because at a six-token delta
+    /// the tail is almost all the parent's text. The row subtracts its parent.
+    #[test]
+    fn a_tree_row_previews_what_the_entry_added() {
+        assert!(APP_JS.contains("function pcAdded("), "the row subtracts its parent");
+        assert!(APP_JS.contains("function pcPreview("), "and abridges for its own width");
+        assert!(APP_JS.contains("pcPreview(line"), "and every row goes through it");
+        assert!(APP_CSS.contains(".pc-prev"), "and the line is styled");
+        // The parent comes off the depth-first ordering, never off the ids —
+        // that is what keeps `a_tree_row_shows_no_cache_key` satisfiable.
+        assert!(APP_JS.contains("function cacheTree("), "the walk tracks the row above");
+    }
+
+    /// No cache key may be shown to the reader.
+    ///
+    /// An entry's id and its parent's id are how the cache finds an entry.
+    /// They name it to nobody else, and the tree already says which entry
+    /// builds on which by indenting it. Sitting in the hover text of every
+    /// row, they read as something meaningful the reader had failed to
+    /// understand.
+    #[test]
+    fn a_tree_row_shows_no_cache_key() {
+        assert!(!APP_JS.contains("+ n.parent"), "a row is captioning itself with a parent key");
+        // Boundary-aware: `n.id` is the key, `n.idle_secs` is the row's age.
+        let reads_id = APP_JS.match_indices("n.id").any(|(at, m)| {
+            APP_JS[at + m.len()..]
+                .chars()
+                .next()
+                .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'))
+        });
+        assert!(!reads_id, "a row is showing the entry's own key");
     }
 
     /// A saved conversation has to answer the same question the tools page

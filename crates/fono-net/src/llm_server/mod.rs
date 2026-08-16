@@ -343,6 +343,37 @@ async fn serve_conn(sock: TcpStream, peer: SocketAddr, ctx: ServerCtx) {
     }
 }
 
+/// Tidy a request path so a client that built its URL carelessly still
+/// reaches the handler it meant.
+///
+/// Two habits are forgiven: repeated slashes, and a trailing one. A client
+/// configured with a base URL of `http://host/v1/` that appends `models`
+/// asks for `/v1//models`, and that is the very first request such a
+/// client makes — answering it with a 404 reads as "this server has no
+/// models" rather than "your URL has a spare slash", which is a poor way
+/// to meet a new caller. Neither form means anything different from the
+/// tidy one, so both are routed the same.
+fn normalise_path(path: &str) -> std::borrow::Cow<'_, str> {
+    let doubled = path.contains("//");
+    let trailing = path.len() > 1 && path.ends_with('/');
+    if !doubled && !trailing {
+        return std::borrow::Cow::Borrowed(path);
+    }
+    let mut out = String::with_capacity(path.len());
+    let mut after_slash = false;
+    for c in path.chars() {
+        if c == '/' && after_slash {
+            continue;
+        }
+        after_slash = c == '/';
+        out.push(c);
+    }
+    if out.len() > 1 && out.ends_with('/') {
+        out.pop();
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 /// Classify a request into a `(surface, op)` pair for the access log.
 fn classify(path: &str) -> (&'static str, String) {
     match path {
@@ -364,7 +395,8 @@ fn classify(path: &str) -> (&'static str, String) {
 /// `debug`-level access line per request (streaming handlers defer the
 /// line to their body task so it carries ttft/tokens).
 async fn route(req: Request<Incoming>, peer: SocketAddr, ctx: ServerCtx) -> Response<ResBody> {
-    let (surface, op) = classify(req.uri().path());
+    let path = normalise_path(req.uri().path()).into_owned();
+    let (surface, op) = classify(&path);
     let ua = access_log::compact_ua(
         req.headers().get(hyper::header::USER_AGENT).and_then(|v| v.to_str().ok()),
     );
@@ -397,7 +429,6 @@ async fn route(req: Request<Incoming>, peer: SocketAddr, ctx: ServerCtx) -> Resp
         }
     }
     let method = req.method().as_str().to_owned();
-    let path = req.uri().path().to_owned();
     let resp = match (method.as_str(), path.as_str()) {
         ("GET", "/v1/models") => openai::models(&ctx, &mut log).await,
         ("POST", "/v1/chat/completions") => openai::chat(req, &ctx, &mut log).await,
@@ -534,5 +565,20 @@ mod tests {
     fn error_response_carries_status_and_message() {
         let resp = error_response(StatusCode::NOT_FOUND, "not found");
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn a_spare_slash_still_reaches_the_handler() {
+        // What a client built from a base URL ending in `/v1/` sends.
+        assert_eq!(normalise_path("/v1//models"), "/v1/models");
+        assert_eq!(normalise_path("//v1///chat//completions"), "/v1/chat/completions");
+        assert_eq!(normalise_path("/v1/models/"), "/v1/models");
+    }
+
+    #[test]
+    fn a_tidy_path_is_left_exactly_as_it_came() {
+        assert!(matches!(normalise_path("/v1/models"), std::borrow::Cow::Borrowed(_)));
+        // Root is a path in its own right, not a trailing slash to strip.
+        assert_eq!(normalise_path("/"), "/");
     }
 }
