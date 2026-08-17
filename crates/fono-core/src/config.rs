@@ -1493,6 +1493,16 @@ pub struct AssistantLocal {
     pub model: String,
     pub quantization: String,
     pub context: u32,
+    /// Gigabytes of disk to spend keeping conversation checkpoints between
+    /// turns and across restarts, so returning to an earlier conversation
+    /// costs a read instead of reading the whole thing again.
+    ///
+    /// Absent means Fono picks a size from free disk and what one checkpoint
+    /// costs for the model in use. `0` turns it off, and then no directory is
+    /// created at all — the absence of the directory is the only credible
+    /// proof that nothing is kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_gb: Option<u32>,
 }
 
 impl Default for AssistantLocal {
@@ -1504,6 +1514,7 @@ impl Default for AssistantLocal {
             model: DEFAULT_POLISH_LOCAL_MODEL.into(),
             quantization: DEFAULT_POLISH_LOCAL_QUANTIZATION.into(),
             context: 8192,
+            prompt_cache_gb: None,
         }
     }
 }

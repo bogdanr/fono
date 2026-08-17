@@ -1630,6 +1630,20 @@ pub fn gather(
                 writeln!(out, "  {:<20} : {}", "", warn(&line))?;
                 col.push(S::Warn, &format!("{} re-reads", c.role), &line);
             }
+            // What a restart would survive. Shown even when empty: a tier
+            // holding nothing means the next start re-reads every conversation
+            // from scratch, which was the largest cost measured.
+            if let (Some(n), Some(bytes), Some(max)) =
+                (c.disk_checkpoints, c.disk_bytes, c.disk_max_bytes)
+            {
+                let line = format!(
+                    "{n} kept on disk for the next start ({:.0} MiB of {:.0} MiB)",
+                    bytes as f64 / (1024.0 * 1024.0),
+                    max as f64 / (1024.0 * 1024.0)
+                );
+                writeln!(out, "  {:<20} : {}", "", dim(&line))?;
+                col.push(S::Info, &format!("{} on disk", c.role), &line);
+            }
         }
         writeln!(out)?;
     }

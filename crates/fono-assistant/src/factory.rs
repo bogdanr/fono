@@ -623,7 +623,8 @@ fn build_embedded_local(
         )
         // Glass Cortex keyframe capture — off unless the daemon armed
         // the process-wide latch from `[overlay].brain_capture`.
-        .with_brain_tap(fono_core::brain_tap::capture_enabled()),
+        .with_brain_tap(fono_core::brain_tap::capture_enabled())
+        .with_checkpoints_from_config(cfg.local.prompt_cache_gb),
     ))
 }
 

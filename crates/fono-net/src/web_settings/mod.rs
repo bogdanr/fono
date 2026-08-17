@@ -1181,6 +1181,8 @@ mod tests {
         // Rust side would blank them silently rather than fail to compile.
         assert!(APP_JS.contains("checkpoint_bytes"), "what one conversation costs");
         assert!(APP_JS.contains("reread_prefix_tokens"), "and why tokens were read twice");
+        assert!(APP_JS.contains("disk_checkpoints"), "and what survives a restart");
+        assert!(APP_JS.contains("disk_covered_tokens"), "and what disk saved re-reading");
     }
 
     /// The panel opens on a sentence saying whether the cache is doing its job.

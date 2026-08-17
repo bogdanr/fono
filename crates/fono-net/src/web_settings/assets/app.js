@@ -2535,6 +2535,10 @@ function cacheCounters(c) {
   out.push(c.pin_releases
     ? '<span class="bad"><b>' + c.pin_releases + '</b> base prompts lost</span>'
     : '<span>no base prompt lost</span>');
+  if (c.disk_covered_tokens) {
+    out.push('<span><b>' + c.disk_covered_tokens.toLocaleString()
+      + '</b> tokens read back from disk instead of re-read</span>');
+  }
   return '<div class="pc-counters mono">' + out.join('') + '</div>' + rereadLine(c);
 }
 
@@ -2777,6 +2781,12 @@ function pcTiles(c) {
       room === null ? 'no model loaded yet'
         : room === 0 ? 'fit \u2014 too little memory for one'
           : room === 1 ? 'conversation kept warm' : 'conversations kept warm')
+    // Only meaningful when a disk tier is attached; without one, a restart
+    // starts from nothing and there is no number to show.
+    + (c.disk_checkpoints === null || c.disk_checkpoints === undefined ? ''
+      : tile(c.disk_checkpoints,
+        'saved for after a restart \u00b7 ' + esc(fmtMiB(c.disk_bytes)) + ' of '
+        + esc(fmtMiB(c.disk_max_bytes))))
     + '</div>';
 }
 

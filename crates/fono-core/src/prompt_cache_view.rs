@@ -23,6 +23,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use crate::prompt_cache::{CacheCountersSnapshot, CacheNodeView, PromptStateCache};
+use crate::prompt_cache_disk::CheckpointStore;
 
 /// One entry, placed in the tree.
 #[derive(Debug, Clone, Serialize)]
@@ -107,6 +108,12 @@ pub struct CacheSnapshot {
     /// The budget is a multiple of this, so it is what makes `max_bytes`
     /// readable as "room for N conversations".
     pub checkpoint_bytes: Option<u64>,
+    /// Checkpoints kept on disk, and the bytes they occupy. `None` when no disk
+    /// tier is attached — which is a fact worth showing rather than hiding,
+    /// because without it every restart starts from nothing.
+    pub disk_checkpoints: Option<usize>,
+    pub disk_bytes: Option<u64>,
+    pub disk_max_bytes: Option<u64>,
     pub nodes: Vec<CacheNode>,
     pub unplaced: Vec<CacheNode>,
     pub verdicts: CacheVerdicts,
@@ -207,6 +214,9 @@ pub fn snapshot(
         bytes_free: max_bytes.saturating_sub(bytes_evictable as u64),
         bytes_resident,
         checkpoint_bytes: cache.checkpoint_bytes(),
+        disk_checkpoints: cache.disk().map(|d| d.usage().1),
+        disk_bytes: cache.disk().map(|d| d.usage().0),
+        disk_max_bytes: cache.disk().map(CheckpointStore::max_bytes),
         verdicts: CacheVerdicts {
             roots,
             heads,

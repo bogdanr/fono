@@ -180,6 +180,12 @@ pub struct LlamaLocalAssistant {
     /// `Arc`. Keeps network-driven turns (the shared LLM server) from
     /// lighting the local overlay while local hotkey turns still do.
     capture_gate: Arc<AtomicBool>,
+    /// Where dropped checkpoints are kept so they survive a conversation
+    /// switch and a restart, and the size configuration asked for. Unset means
+    /// checkpoints live in memory only, which is what the benchmarks and tests
+    /// want (see ADR 0042).
+    checkpoint_dir: Option<PathBuf>,
+    checkpoint_gb: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -323,6 +329,8 @@ impl LlamaLocalAssistant {
             batch_size,
             ubatch_size,
             state: Arc::new(Mutex::new(None)),
+            checkpoint_dir: None,
+            checkpoint_gb: None,
             prompt_state_cache: Arc::new(Mutex::new(PromptStateCache::sized_for_host())),
             cache_counters: Arc::new(CacheCounters::default()),
             brain_tap_enabled: false,
@@ -338,6 +346,36 @@ impl LlamaLocalAssistant {
     pub fn with_brain_tap(mut self, enabled: bool) -> Self {
         self.brain_tap_enabled = enabled;
         self
+    }
+
+    /// Keep dropped checkpoints in `dir` so returning to an earlier
+    /// conversation, or coming back after a restart, costs a read rather than
+    /// reading the whole conversation again. `gb` is the size configuration
+    /// asked for: `None` derives one, `Some(0)` refuses and creates nothing.
+    #[must_use]
+    pub fn with_checkpoint_tier(mut self, dir: impl Into<PathBuf>, gb: Option<u32>) -> Self {
+        self.checkpoint_dir = Some(dir.into());
+        self.checkpoint_gb = gb;
+        self
+    }
+
+    /// Keep checkpoints in Fono's own cache directory, sized as `gb` asks.
+    ///
+    /// Resolving the directory here rather than at the call site keeps the
+    /// caller from having to handle a failure it cannot act on: if the paths
+    /// cannot be resolved, checkpoints stay in memory and the session still
+    /// works.
+    #[must_use]
+    pub fn with_checkpoints_from_config(self, gb: Option<u32>) -> Self {
+        match fono_core::paths::Paths::resolve() {
+            Ok(paths) => self.with_checkpoint_tier(paths.prompt_checkpoints_dir(), gb),
+            Err(err) => {
+                tracing::warn!(
+                    "prompt checkpoints: no cache directory ({err}); they will not survive a restart"
+                );
+                self
+            }
+        }
     }
 
     /// The shared tap handle, once the model has loaded with capture
@@ -370,6 +408,8 @@ impl LlamaLocalAssistant {
             threads: self.threads,
             batch_size: self.batch_size,
             ubatch_size: self.ubatch_size,
+            checkpoint_dir: self.checkpoint_dir.clone(),
+            checkpoint_gb: self.checkpoint_gb,
             state: Arc::clone(&self.state),
             prompt_state_cache: Arc::clone(&self.prompt_state_cache),
             cache_counters: Arc::clone(&self.cache_counters),
@@ -410,12 +450,20 @@ impl LlamaLocalAssistant {
         // Now that the model is known, budget the checkpoint cache in the unit
         // that decides whether it can hold anything: one copy of this model's
         // KV cache at this context.
+        // Checkpoints on disk are keyed by the same runtime identity as the ones
+        // in memory, so a change of model, context or binding sweeps them.
+        let runtime_sha256 = sha256_text(&self.runtime_identity()?);
         fono_core::llama_backend::budget_prompt_cache(
             &self.prompt_state_cache,
             &self.model_path,
             self.context_size,
             KV_CACHE_TYPE,
             KV_CACHE_TYPE,
+            self.checkpoint_dir.as_deref().map(|dir| fono_core::llama_backend::DiskTierRequest {
+                dir,
+                configured_gb: self.checkpoint_gb,
+                runtime_sha256: &runtime_sha256,
+            }),
         );
         let elapsed_ms = started.elapsed().as_millis() as u64;
         let model_name = self.model_path.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
@@ -733,6 +781,33 @@ impl LlamaLocalAssistant {
                     }
                     PrefixMissCause::Deepest | PrefixMissCause::RuntimeKeyChange => {}
                 }
+                // Memory came back short. A checkpoint kept on disk may reach
+                // further, and reading one costs a fraction of the prefill it
+                // saves. Skipped when memory already offered the deepest thing
+                // there is, so a warm turn never touches the disk.
+                let promoted = if matches!(lookup.cause, PrefixMissCause::Deepest) {
+                    None
+                } else {
+                    cache.promote_from_disk(
+                        &runtime,
+                        &[
+                            PromptStateCacheLayer::F8ChatPrefix,
+                            PromptStateCacheLayer::HistoryPrefix,
+                            PromptStateCacheLayer::ExactPrompt,
+                            PromptStateCacheLayer::F8System,
+                        ],
+                        &token_ids(&prefix_tokens),
+                        lookup.matched_tokens,
+                    )
+                };
+                // Tokens a checkpoint on disk covered are not read again, so
+                // they must not be counted as re-read. Without this the panel
+                // would report the very cost the tier just avoided.
+                let covered =
+                    promoted.as_ref().and_then(|k| cache.get(k)).map_or(0, |e| e.token_count);
+                let reread = lookup.decoded_prefix_tokens.saturating_sub(covered);
+                fields["read_from_disk_tokens"] = json!(covered);
+                fields["reread_tokens"] = json!(reread);
                 // Also on the log, not only the trace. A trace is installed
                 // per dictation/assistant turn; a request arriving over the
                 // OpenAI-compatible endpoint has none, and that is exactly the
@@ -741,16 +816,15 @@ impl LlamaLocalAssistant {
                     cause = lookup.cause.as_str(),
                     matched_tokens = lookup.matched_tokens,
                     decoded_prefix_tokens = lookup.decoded_prefix_tokens,
+                    read_from_disk_tokens = covered,
                     total_tokens = full_tokens.len(),
                     detail = %fields,
                     "prompt cache lookup"
                 );
                 current_instant("llm.prompt_cache_lookup", "cache", CACHE_LANE, fields);
-                self.cache_counters.record_prefix_reread(
-                    lookup.cause.as_str(),
-                    lookup.decoded_prefix_tokens as u64,
-                );
-                lookup.hit.and_then(|hk| cache.get(&hk).map(|entry| (hk, entry)))
+                self.cache_counters.record_prefix_reread(lookup.cause.as_str(), reread as u64);
+                self.cache_counters.record_disk_coverage(covered as u64);
+                promoted.or(lookup.hit).and_then(|hk| cache.get(&hk).map(|entry| (hk, entry)))
             };
             let mut start = 0_usize;
             let mut matched = false;
@@ -1805,15 +1879,26 @@ impl LlamaLocalAssistant {
         Ok(sample_idx)
     }
 
-    fn prompt_state_cache_key(
-        &self,
-        layer: PromptStateCacheLayer,
-        prompt: &str,
-        tokens: &[llama_cpp_2::token::LlamaToken],
-    ) -> Result<PromptStateCacheKey> {
-        let runtime_identity = format!(
-            "llama-cpp-2:{}|model={}|files={}|ctx={}|threads={}|batch={}|ubatch={}|swa_full={}|kv={:?}",
-            env!("CARGO_PKG_VERSION"),
+    /// Everything that changes the bytes of a saved state, or what those bytes
+    /// mean. A checkpoint whose runtime differs in any of these cannot be
+    /// restored into this context — so this is what decides reuse, and it has to
+    /// be complete rather than merely plausible.
+    ///
+    /// The binding version and the state-format version are named deliberately,
+    /// and Fono's own version deliberately is not: a Fono release that touches
+    /// none of this would otherwise throw away every stored checkpoint, and that
+    /// matters now checkpoints outlive the process.
+    ///
+    /// The model is identified by each shard's name, size and modification time
+    /// rather than by hashing its contents. Hashing a 17 GB GGUF at every start
+    /// would cost more than the tier saves. The trade is that copying a model
+    /// in, or restoring it from a backup, invalidates checkpoints that would
+    /// still have been good — the harmless direction.
+    fn runtime_identity(&self) -> Result<String> {
+        Ok(format!(
+            "llama-cpp-2:{}|state_format={}|model={}|files={}|ctx={}|threads={}|batch={}|ubatch={}|swa_full={}|kv={:?}",
+            fono_core::llama_backend::LLAMA_BINDING_VERSION,
+            fono_core::llama_backend::STATE_FORMAT_VERSION,
             self.model_path.display(),
             model_files_fingerprint(&self.model_path).with_context(|| {
                 format!("read model metadata {}", self.model_path.display())
@@ -1824,7 +1909,16 @@ impl LlamaLocalAssistant {
             self.ubatch_size.map_or_else(|| "auto".to_string(), |v| v.to_string()),
             SWA_FULL,
             KV_CACHE_TYPE,
-        );
+        ))
+    }
+
+    fn prompt_state_cache_key(
+        &self,
+        layer: PromptStateCacheLayer,
+        prompt: &str,
+        tokens: &[llama_cpp_2::token::LlamaToken],
+    ) -> Result<PromptStateCacheKey> {
+        let runtime_identity = self.runtime_identity()?;
         Ok(PromptStateCacheKey::new(
             layer,
             sha256_text(&runtime_identity),

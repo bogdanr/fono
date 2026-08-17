@@ -1,5 +1,65 @@
 # Fono — Project Status
-Last updated: 2026-08-14
+Last updated: 2026-08-17
+
+## 2026-08-17 — Conversations are now kept on disk
+
+Fono writes a conversation to disk when it has to drop it from memory, and when
+it shuts down cleanly. Coming back to one it wrote costs about a second instead
+of the minute or more of re-reading it used to. Restarting Fono no longer throws
+the work away.
+
+Measured on this machine, twelve conversations driven through the network
+interface: after a restart, a conversation read back from disk answered in 1.4
+seconds against 23.9 for the same question with nothing kept. Across a later
+session Fono read 3,787 words back from disk and only 10 a second time.
+
+How much it keeps is worked out from how big one conversation actually is for the
+model in use — a fixed number of gigabytes would hold fifteen conversations of
+one model and one of another. Fono refuses to use a folder that lives in memory
+rather than on disk, since that would spend the memory it is trying to free.
+Because disk now holds the older conversations, memory only keeps the current one
+and its predecessor, which gives back a few hundred megabytes for the model.
+
+Nothing is ever trusted on the way back in: a file whose contents do not match
+what it claims is deleted rather than used. That is the one place care is spent,
+because a mismatched copy was the cause of a bug fixed the week before.
+
+The settings page and `fono doctor` both say how many conversations are on disk,
+how much room they take, and how many words came back from disk instead of being
+read again.
+
+## 2026-08-16 — Keeping conversations on disk is now worth building
+
+The question behind weeks of measurement was whether saving a conversation to
+disk would ever pay for itself, or whether the prompt changes too much between
+turns for anything kept to be recognised again. It has an answer.
+
+Six conversations were run through Fono's network interface, more than memory
+can hold at once. Returning to one that had been dropped cost between seventy
+and a hundred and fourteen seconds of re-reading; the same question, in the
+conversation still held, came back in four. Restarting Fono threw away
+everything and cost the same again. Across the session, thirty-two thousand
+words were read a second time because a conversation had been dropped, against
+five for every other reason combined.
+
+So the next piece of work is keeping conversations on disk. Reading two hundred
+megabytes back takes about twenty-five milliseconds on this machine, against the
+minute or more it saves.
+
+Two things found along the way and fixed. A coding tool talking to Fono was
+having its answers cut off at a few hundred words — fine for something spoken,
+useless for a tool that thinks out loud and puts the command it wants to run at
+the end. And restoring a saved conversation could fail the request outright on
+models that keep a running summary; both ends are now checked, and a mismatched
+copy is discarded rather than used.
+
+Fono also survives its graphics driver giving up. On this laptop the driver
+kills a reply that takes too long, which takes Fono down with it and cannot be
+caught from inside. Fono now notices at startup that it died mid-reply on the
+graphics chip, runs on the processor for that session, and says why; the next
+clean start uses the chip again. Five explanations for the crash were tried and
+none survived the evidence, so the real repair belongs upstream in the graphics
+library Fono uses, and there is a plan for sending it there.
 
 ## 2026-08-14 — The cache can be told why it missed, and a wrong number is fixed
 

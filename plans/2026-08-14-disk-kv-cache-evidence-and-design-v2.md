@@ -253,17 +253,19 @@ the whole build.
       test still needs a model larger than RAM to say anything. What this does
       establish: neither proposal can help the configurations Stage A covered,
       so any benefit is confined to the over-committed case.
-- [ ] Task 10. **Gate.** Read Task 2's taxonomy from a real coding-agent
-      session. Proceed to Stage C only if a persisted checkpoint would have been
-      matched on a later turn. If divergence dominates, go to Stage B and stop.
-      **Control run done, precondition done; needs a real client.**
-      Everything it needs is built: point a coding agent at the daemon's
-      OpenAI-compatible endpoint, then read the `llm.prompt_cache_lookup`
-      events. The gate resolves **yes** if `eviction` accounts for a material
-      share of decoded prefix tokens, and **no** if `divergence` dominates.
-      See "The synthetic control run" below for what the append-only control
-      established, and "The budget is 256 MiB" for why the gate could not be
-      read until the in-memory budget was sized (Task 10a, now done).
+- [x] Task 10. **Gate — resolved yes on 2026-08-16. Build Stage C.**
+      Six conversations over the OpenAI-compatible endpoint, at a budget that
+      holds three checkpoints. Every revisited conversation whose checkpoint had
+      been dropped reported `eviction`: **32,435 prefix tokens re-decoded across
+      three turns, against 5 for every other cause combined.** The one
+      conversation whose checkpoint survived answered in 4.3 s; the three that
+      had lost theirs took 76, 80 and 114 s for the same shape of question.
+      A daemon restart then cost a further 4,673 tokens that the taxonomy cannot
+      attribute at all, because an empty cache leaves no tombstone — the case
+      for disk that no in-memory measurement can make.
+      The budget bound on **bytes**, not on `max_entries`, so the hard-coded 10
+      is not a cheaper alternative here.
+      Full write-up: `plans/2026-08-16-task-10-gate-resolved.md`.
 - [x] Task 10a. **Precondition to the gate.** Size the in-memory cache budget
       against available RAM instead of the hard-coded 256 MiB both backends
       used. `PromptStateCache::sized_for_host` takes a quarter of free RAM
@@ -301,40 +303,48 @@ the whole build.
 
 ### Stage C — The disk tier, sized by Stage A
 
-- [ ] Task 14. ADR before code, matching the posture of ADR 0040: 0600
+- [x] Task 14. ADR before code, matching the posture of ADR 0040: 0600
       permissions, finite retention, an opt-out that creates **no file at all**,
       and an explicit delete control. A KV blob is a materialisation of the
-      transcript.
-- [ ] Task 15. Refuse to enable the tier when the cache directory is
-      memory-backed, and report the refusal in `fono doctor`.
-- [ ] Task 16. Key persistent entries on an explicit `STATE_FORMAT_VERSION`
+      transcript. — `docs/decisions/0042-prompt-checkpoints-on-disk.md`. Files
+      are 0600, the directory 0700, `prompt_cache_gb = 0` creates nothing.
+- [x] Task 15. Refuse to enable the tier when the cache directory is
+      memory-backed, and report the refusal in `fono doctor`. — the refusal
+      fired for real during testing, on a tmpfs `/tmp`.
+- [x] Task 16. Key persistent entries on an explicit `STATE_FORMAT_VERSION`
       composed with the binding version, and on the **GGUF content hash** rather
       than model mtime. Decouple from `CARGO_PKG_VERSION` — as written today
-      every point release would discard the whole cache, defeating goal 1.
-- [ ] Task 17. On-disk format: header with magic, format version, runtime key,
+      every point release would discard the whole cache, defeating goal 1. —
+      one `runtime_identity()` now feeds both the in-memory key and the disk
+      tier; it carries no `CARGO_PKG_VERSION`.
+- [x] Task 17. On-disk format: header with magic, format version, runtime key,
       token count, payload length, payload checksum; then payload; then the
       `prefix_tokens` vector. The token vector is **mandatory** — an entry that
       loses it drops out of longest-prefix matching entirely.
-- [ ] Task 18. One content-addressed file per entry, published `.part` → verify
+- [x] Task 18. One content-addressed file per entry, published `.part` → verify
       → rename, mode 0600.
-- [ ] Task 19. Write-back on eviction, never write-through on insert, skipping
+- [x] Task 19. Write-back on eviction, never write-through on insert, skipping
       the write when the content-addressed file already exists. At 16k, write
       amplification is the dominant cost of the feature — and 11× worse on Gemma
-      than on Qwen, which is why Task 5 measures both.
+      than on Qwen, which is why Task 5 measures both. Also written on clean
+      shutdown, which is the trigger the gate's restart finding argued for.
 - [ ] Task 20. All disk I/O off the model mutex: reads resolved before the lock
       is taken, writes on a niced background thread. A multi-gigabyte write under
       the model lock stalls every other conversation.
-- [ ] Task 21. Quarantine on failure — any header, checksum or `set_state_data`
+      **Deferred deliberately.** A save costs about what a restore costs —
+      ~200 ms on qwen, ~1 s on gemma — against turns of 4 to 114 seconds, so
+      0.2–5 %. Writes are synchronous until a measurement says otherwise.
+- [x] Task 21. Quarantine on failure — any header, checksum or `set_state_data`
       rejection deletes the file and records a miss; never retry a bad blob.
       Wire the degenerate-output guard to delete the backing entry, or a poisoned
       checkpoint survives restarts.
-- [ ] Task 22. Retention: LRU against a byte cap, plus deletion of entries whose
+- [x] Task 22. Retention: LRU against a byte cap, plus deletion of entries whose
       runtime key is no longer current, plus a hygiene sweep for anything
       untouched beyond a fixed age. Swept at startup alongside the existing
       history purge, not on a timer.
-- [ ] Task 23. One config key, absent by default, `0` meaning disabled. A test
-      fails the build if a second knob appears.
-- [ ] Task 24. Confirm no net-new dependency, and **add no compression crate** —
+- [x] Task 23. One config key, absent by default, `0` meaning disabled. A test
+      fails the build if a second knob appears. — `prompt_cache_gb`.
+- [x] Task 24. Confirm no net-new dependency, and **add no compression crate** —
       KV data compresses poorly and binary size is the standing constraint.
 
 ### Stage D — Sequence forking, gated on a correctness fix

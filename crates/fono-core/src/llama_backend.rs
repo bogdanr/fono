@@ -26,6 +26,28 @@ use tracing::{debug, info, warn};
 
 static LLAMA_LOG_INIT: Once = Once::new();
 
+/// Version of the llama.cpp bindings whose serialization format a saved
+/// checkpoint is written in.
+///
+/// A saved state is llama.cpp's own byte format, and that format is not
+/// promised to be stable across versions, so a checkpoint written by one and
+/// read by another can restore into nonsense. It therefore belongs in the key
+/// that decides whether a stored checkpoint may be used.
+///
+/// Kept by hand rather than read from the crate, because a dependency's version
+/// is not available to `env!`. The test below fails the build if the pin in
+/// `Cargo.lock` moves without this following it.
+pub const LLAMA_BINDING_VERSION: &str = "0.1.154";
+
+/// Version of Fono's own reading of a saved state — how a checkpoint's tokens,
+/// positions and payload relate to each other.
+///
+/// Separate from [`LLAMA_BINDING_VERSION`] because the two go stale for
+/// different reasons: llama.cpp can change its bytes while Fono's handling is
+/// unchanged, and Fono can change how it trims or restores a state while the
+/// bytes are identical. Bump this when the latter happens.
+pub const STATE_FORMAT_VERSION: u32 = 1;
+
 /// Budget a prompt-state cache for the model and context that just loaded.
 ///
 /// The cache is built before the model is known, so its opening budget is a
@@ -42,6 +64,7 @@ pub fn budget_prompt_cache(
     n_ctx: u32,
     type_k: KvCacheType,
     type_v: KvCacheType,
+    disk: Option<DiskTierRequest<'_>>,
 ) {
     let Some(checkpoint) = crate::gpu_offload::kv_cache_bytes(model_path, n_ctx, type_k, type_v)
     else {
@@ -49,6 +72,13 @@ pub fn budget_prompt_cache(
         return;
     };
     let Ok(mut cache) = cache.lock() else { return };
+    // Disk first: whether it is attached decides how much RAM the memory tier
+    // needs. With somewhere to put what it drops, memory only has to hold the
+    // conversation being served; without, it has to hold the predecessors a
+    // longest-prefix match needs too.
+    if let Some(request) = disk {
+        attach_checkpoint_tier(&mut cache, checkpoint, request);
+    }
     let budget = cache.resize_for_checkpoint(checkpoint, crate::hwcheck::available_ram_bytes());
     let mb = |b: u64| b / (1024 * 1024);
     if cache.holds_a_checkpoint(checkpoint) {
@@ -70,6 +100,141 @@ pub fn budget_prompt_cache(
             mb(checkpoint)
         );
     }
+}
+
+/// Where a caller wants checkpoints kept, and any size it was told to use.
+#[derive(Debug, Clone, Copy)]
+pub struct DiskTierRequest<'a> {
+    /// Directory the checkpoints live in. Created on demand.
+    pub dir: &'a Path,
+    /// Size from configuration, in whole GiB. `None` derives one; `Some(0)`
+    /// refuses.
+    pub configured_gb: Option<u32>,
+    /// Hash of everything that decides whether a stored checkpoint can be
+    /// restored into this context. Checkpoints stored under any other value are
+    /// swept on attach: they can never match again.
+    pub runtime_sha256: &'a str,
+}
+
+/// Give the in-memory cache somewhere to put the checkpoints it drops.
+///
+/// Every outcome is reported, including the refusals, because a user who
+/// expects checkpoints to survive a restart has no other way to tell whether
+/// they do.
+fn attach_checkpoint_tier(
+    cache: &mut crate::prompt_cache::PromptStateCache,
+    checkpoint_bytes: u64,
+    request: DiskTierRequest<'_>,
+) {
+    let mb = |b: u64| b / (1024 * 1024);
+    let free = crate::hwcheck::free_disk_bytes(request.dir);
+    let max_bytes =
+        match size_checkpoint_tier(request.dir, checkpoint_bytes, request.configured_gb, free) {
+            CheckpointTier::On { max_bytes } => max_bytes,
+            CheckpointTier::OffByChoice => {
+                debug!("prompt checkpoints: turned off in configuration");
+                return;
+            }
+            CheckpointTier::OffNoRoom { checkpoint_bytes, free_bytes } => {
+                warn!(
+                    "prompt checkpoints: {} MB free where one checkpoint is {} MB; \
+                     they will not survive a restart until there is more room",
+                    mb(free_bytes),
+                    mb(checkpoint_bytes)
+                );
+                return;
+            }
+        };
+    // The store has the last word on whether it can run at all, so that the
+    // reason a user is shown comes from the code that decided it.
+    let Some(store) =
+        crate::prompt_cache_disk::CheckpointStore::open(request.dir.to_path_buf(), max_bytes)
+    else {
+        let why = crate::prompt_cache_disk::CheckpointStore::refusal(request.dir, max_bytes)
+            .unwrap_or_else(|| format!("{} could not be created", request.dir.display()));
+        warn!("prompt checkpoints: {why}; they will not survive a restart");
+        return;
+    };
+    let stale = cache.attach_disk(store, request.runtime_sha256);
+    let (held_bytes, held) =
+        cache.disk().map(super::prompt_cache_disk::CheckpointStore::usage).unwrap_or((0, 0));
+    info!(
+        "prompt checkpoints: keeping up to {} MB in {} ({held} there now, {} MB, {stale} dropped as \
+         stored for a different model or setting)",
+        mb(max_bytes),
+        request.dir.display(),
+        mb(held_bytes)
+    );
+}
+
+/// Where checkpoints are kept, and how much room they get.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointTier {
+    /// Keeping checkpoints, with this many bytes to spend.
+    On { max_bytes: u64 },
+    /// Turned off in configuration. No directory is created.
+    OffByChoice,
+    /// Not enough free disk for even one checkpoint.
+    OffNoRoom { checkpoint_bytes: u64, free_bytes: u64 },
+}
+
+/// Fraction of free disk the tier may claim when no size is configured.
+///
+/// Deliberately modest: this is a cache on a disk the user has other plans for,
+/// and the tier's value is already realised by holding a handful of checkpoints.
+const DISK_SHARE_PERCENT: u64 = 20;
+
+/// Checkpoints the automatic size aims to hold. Past a handful the returns fall
+/// away — a session revisits recent conversations, not distant ones.
+const DISK_CHECKPOINTS: u64 = 8;
+
+/// Ceiling on the automatic size, whatever the arithmetic says.
+///
+/// Eight checkpoints is the right shape for a mixture model, whose checkpoints
+/// are around 200 MB, and eight of those is 1.7 GiB. It is the wrong shape for a
+/// dense 26B at a 20k context, whose checkpoints are 2.3 GB each: eight of those
+/// is 18 GiB of cache, which no user asked for. A cache should not be the largest
+/// thing Fono puts on the disk.
+///
+/// This is a cap on a derived number, not a budget in its own right — the
+/// distinction that matters, because a fixed budget holds fifteen checkpoints of
+/// one model and one of another. Under the cap a large dense model gets one or
+/// two checkpoints, which is enough for the case that motivated the tier:
+/// resuming the conversation in progress after a restart.
+const DISK_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+/// Decide how much disk the checkpoint tier gets.
+///
+/// Sized in checkpoints rather than gigabytes, for the reason the memory budget
+/// already learned: the same constant means wildly different things per model,
+/// and a tier that cannot hold one checkpoint holds none. A configured `0` is an
+/// explicit refusal and is honoured before anything else is looked at.
+#[must_use]
+pub fn size_checkpoint_tier(
+    dir: &Path,
+    checkpoint_bytes: u64,
+    configured_gb: Option<u32>,
+    free_disk_bytes: Option<u64>,
+) -> CheckpointTier {
+    if configured_gb == Some(0) {
+        return CheckpointTier::OffByChoice;
+    }
+    if crate::prompt_cache_disk::path_is_memory_backed(dir) {
+        // Not decided here — `CheckpointStore::open` refuses a memory-backed
+        // directory and says why. Sizing it as if it would work keeps one owner
+        // of that reason.
+        return CheckpointTier::On { max_bytes: checkpoint_bytes };
+    }
+    if let Some(gb) = configured_gb {
+        return CheckpointTier::On { max_bytes: u64::from(gb) * 1024 * 1024 * 1024 };
+    }
+    let free = free_disk_bytes.unwrap_or(0);
+    let share = free / 100 * DISK_SHARE_PERCENT;
+    let budget = checkpoint_bytes.saturating_mul(DISK_CHECKPOINTS).min(share).min(DISK_MAX_BYTES);
+    if budget < checkpoint_bytes {
+        return CheckpointTier::OffNoRoom { checkpoint_bytes, free_bytes: free };
+    }
+    CheckpointTier::On { max_bytes: budget }
 }
 
 /// Redirect llama.cpp + ggml's chatty stderr logging through `tracing`
@@ -311,6 +476,98 @@ fn is_quantized(ty: KvCacheType) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A saved checkpoint is llama.cpp's own byte format, and the version that
+    /// wrote it decides whether it can be read. The pin here has to follow the
+    /// pin in `Cargo.lock`, and nothing but a test notices when it stops
+    /// following it — so a bump that forgets this fails the build rather than
+    /// letting stale checkpoints restore into nonsense.
+    #[test]
+    fn the_binding_version_matches_the_locked_dependency() {
+        let lock =
+            std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.lock"))
+                .expect("read Cargo.lock");
+        let locked = lock
+            .split("name = \"llama-cpp-2\"")
+            .nth(1)
+            .and_then(|rest| rest.split("version = \"").nth(1))
+            .and_then(|rest| rest.split('"').next())
+            .expect("llama-cpp-2 version in Cargo.lock");
+        assert_eq!(
+            locked, LLAMA_BINDING_VERSION,
+            "llama-cpp-2 moved to {locked}; update LLAMA_BINDING_VERSION so stored \
+             checkpoints written by {LLAMA_BINDING_VERSION} are not read back by it"
+        );
+    }
+
+    #[test]
+    fn a_configured_zero_refuses_before_anything_else_is_looked_at() {
+        // The opt-out has to hold even where the automatic size would have
+        // said yes, and it must not create the directory to find out.
+        let dir = Path::new("/nonexistent/fono-test-checkpoints");
+        let tier = size_checkpoint_tier(dir, 200 * 1024 * 1024, Some(0), Some(u64::MAX));
+        assert_eq!(tier, CheckpointTier::OffByChoice);
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn a_configured_size_is_taken_as_given() {
+        let tier = size_checkpoint_tier(Path::new("/var/tmp"), 200 * 1024 * 1024, Some(2), None);
+        assert_eq!(tier, CheckpointTier::On { max_bytes: 2 * 1024 * 1024 * 1024 });
+    }
+
+    #[test]
+    fn the_automatic_size_is_counted_in_checkpoints_and_capped_by_free_disk() {
+        let checkpoint = 200 * 1024 * 1024;
+        let dir = Path::new("/var/tmp");
+
+        // Plenty of room: the number of checkpoints decides, not the disk.
+        let roomy = size_checkpoint_tier(dir, checkpoint, None, Some(500 * 1024 * 1024 * 1024));
+        assert_eq!(roomy, CheckpointTier::On { max_bytes: checkpoint * DISK_CHECKPOINTS });
+
+        // A nearly full disk: the share decides, and it still holds several.
+        // The share divides before multiplying so it cannot overflow, which
+        // costs a few bytes of rounding.
+        let free = 5 * 1024 * 1024 * 1024_u64;
+        let tight = size_checkpoint_tier(dir, checkpoint, None, Some(free));
+        assert_eq!(tight, CheckpointTier::On { max_bytes: free / 100 * DISK_SHARE_PERCENT });
+
+        // Below one checkpoint the tier holds nothing at all, so say so rather
+        // than write a file the next sweep deletes. This is the same cliff the
+        // memory budget has, one storey down.
+        let starved = size_checkpoint_tier(dir, checkpoint, None, Some(512 * 1024 * 1024));
+        assert_eq!(
+            starved,
+            CheckpointTier::OffNoRoom {
+                checkpoint_bytes: checkpoint,
+                free_bytes: 512 * 1024 * 1024
+            }
+        );
+
+        // An unreadable disk reads as no room, not as unlimited room.
+        assert!(matches!(
+            size_checkpoint_tier(dir, checkpoint, None, None),
+            CheckpointTier::OffNoRoom { .. }
+        ));
+    }
+
+    /// A dense 26B checkpoint is 2.3 GB, so eight of them is 18 GiB. The cap
+    /// keeps the automatic size to something a user would not be startled to
+    /// find on their disk, and still leaves room for the checkpoint in front of
+    /// it — which is the case the tier exists for.
+    #[test]
+    fn a_huge_checkpoint_does_not_produce_a_huge_cache() {
+        let checkpoint = 2337 * 1024 * 1024_u64;
+        let tier = size_checkpoint_tier(
+            Path::new("/var/tmp"),
+            checkpoint,
+            None,
+            Some(500 * 1024 * 1024 * 1024),
+        );
+        assert_eq!(tier, CheckpointTier::On { max_bytes: DISK_MAX_BYTES });
+        let CheckpointTier::On { max_bytes } = tier else { unreachable!() };
+        assert!(max_bytes >= checkpoint, "the cap must still admit one checkpoint");
+    }
 
     // Regression: the shared-model cache key must fold in the load-time
     // params that change resident layout, so per-role variants of the *same*

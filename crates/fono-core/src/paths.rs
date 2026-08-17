@@ -189,6 +189,15 @@ impl Paths {
         self.cache_dir.join("models").join("voices")
     }
 
+    /// Where conversation checkpoints are kept so returning to an earlier
+    /// conversation, or coming back after a restart, costs a read rather than
+    /// reading the whole conversation again (ADR 0042). Under the cache dir
+    /// because every file in it is reproducible by doing the work again.
+    #[must_use]
+    pub fn prompt_checkpoints_dir(&self) -> PathBuf {
+        self.cache_dir.join("checkpoints")
+    }
+
     #[must_use]
     pub fn ipc_socket(&self) -> PathBuf {
         self.state_dir.join("fono.sock")

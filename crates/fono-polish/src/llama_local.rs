@@ -228,6 +228,9 @@ impl LlamaLocal {
             self.context_size,
             KvCacheType::F16,
             KvCacheType::F16,
+            // Polish prompts are short and its cache turns over inside a
+            // session, so there is nothing worth keeping between restarts.
+            None,
         );
         // Single, concise INFO line summarising what got loaded — name +
         // on-disk size (≈ resident memory once mapped) + load wall time.

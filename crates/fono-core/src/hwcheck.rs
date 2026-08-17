@@ -592,7 +592,16 @@ fn macos_available_ram() -> Option<u64> {
 
 /// Free bytes on the filesystem hosting `path`. Linux/Unix only;
 /// other targets return `None` and the caller treats it as 0.
-fn free_disk_bytes(path: &Path) -> Option<u64> {
+///
+/// Walks up to the nearest existing ancestor first, so asking about a directory
+/// that has not been created yet answers about the filesystem it would land on
+/// rather than failing.
+pub fn free_disk_bytes(path: &Path) -> Option<u64> {
+    let mut existing = path;
+    while !existing.exists() {
+        existing = existing.parent()?;
+    }
+    let path = existing;
     #[cfg(unix)]
     {
         use std::ffi::CString;

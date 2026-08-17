@@ -39,6 +39,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use tracing::debug;
+
 /// Size and modification time of every file that makes up a model, for the
 /// runtime half of a cache key.
 ///
@@ -181,6 +183,22 @@ impl PromptStateCacheLayer {
         }
     }
 
+    /// Inverse of [`Self::as_str`], for reading a key back off disk.
+    #[must_use]
+    pub fn parse_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "f7_system" => Self::F7System,
+            "f8_system" => Self::F8System,
+            "f7_context" => Self::F7Context,
+            "window_context" => Self::WindowContext,
+            "f8_chat_prefix" => Self::F8ChatPrefix,
+            "history_prefix" => Self::HistoryPrefix,
+            "benchmark_prefix" => Self::BenchmarkPrefix,
+            "exact_prompt" => Self::ExactPrompt,
+            _ => return None,
+        })
+    }
+
     /// Context-independent base prefixes that are reused on every turn of every
     /// conversation. These are prewarmed at startup and must never be evicted
     /// by LRU churn. All other layers age out normally.
@@ -232,13 +250,36 @@ impl PromptStateCacheKey {
 
     pub fn stable_id(&self) -> String {
         format!(
-            "{:?}:runtime={}:prompt={}:tokens={}:count={}",
-            self.layer,
+            "{}|{}|{}|{}|{}",
+            self.layer.as_str(),
             self.runtime_sha256,
             self.prompt_sha256,
             self.token_sha256,
             self.token_count
         )
+    }
+
+    /// Rebuild a key from [`Self::stable_id`].
+    ///
+    /// The disk tier stores this line beside each checkpoint so a file can be
+    /// admitted straight to the in-memory cache without the caller re-deriving
+    /// anything. `|` is the separator because the three hashes are hex and no
+    /// layer name contains one.
+    ///
+    /// `None` for anything that does not parse, which the disk tier treats the
+    /// same as any other corruption: delete the file.
+    #[must_use]
+    pub fn parse_stable_id(encoded: &str) -> Option<Self> {
+        let mut fields = encoded.split('|');
+        let layer = PromptStateCacheLayer::parse_name(fields.next()?)?;
+        let runtime_sha256 = fields.next()?.to_string();
+        let prompt_sha256 = fields.next()?.to_string();
+        let token_sha256 = fields.next()?.to_string();
+        let token_count = fields.next()?.parse().ok()?;
+        if fields.next().is_some() {
+            return None;
+        }
+        Some(Self { layer, runtime_sha256, prompt_sha256, token_sha256, token_count })
     }
 }
 
@@ -439,6 +480,10 @@ pub struct CacheCounters {
     /// 16k prompt costs more than a hundred on short ones, and it is the cost
     /// that decides whether checkpoints are worth storing.
     rereads: Mutex<BTreeMap<String, u64>>,
+    /// Prefix tokens a checkpoint read back from disk covered, so they were not
+    /// read again. The counterpart to `rereads`: together they say what the
+    /// disk tier saved and what nothing could have saved.
+    disk_covered_tokens: AtomicU64,
 }
 
 impl CacheCounters {
@@ -467,6 +512,11 @@ impl CacheCounters {
         }
     }
 
+    /// A checkpoint read back from disk covered `tokens` prefix tokens.
+    pub fn record_disk_coverage(&self, tokens: u64) {
+        self.disk_covered_tokens.fetch_add(tokens, Ordering::Relaxed);
+    }
+
     /// Fold in the churn one insert caused.
     pub fn apply(&self, report: &CacheMutationReport) {
         self.evictions.fetch_add(report.evicted.len() as u64, Ordering::Relaxed);
@@ -485,6 +535,7 @@ impl CacheCounters {
             pin_releases: self.pin_releases.load(Ordering::Relaxed),
             cold_prefill_reasons: self.reasons.lock().map(|r| r.clone()).unwrap_or_default(),
             reread_prefix_tokens: self.rereads.lock().map(|r| r.clone()).unwrap_or_default(),
+            disk_covered_tokens: self.disk_covered_tokens.load(Ordering::Relaxed),
         }
     }
 }
@@ -502,6 +553,8 @@ pub struct CacheCountersSnapshot {
     /// Prefix tokens read again, by cause — the taxonomy's headline. Ordered so
     /// the serialized form is stable.
     pub reread_prefix_tokens: BTreeMap<String, u64>,
+    /// Prefix tokens a checkpoint read back from disk covered.
+    pub disk_covered_tokens: u64,
 }
 
 impl CacheCountersSnapshot {
@@ -539,6 +592,13 @@ pub struct PromptStateCache {
     /// is a multiple of it, so reporting the budget without it says nothing
     /// about how many conversations stay warm.
     checkpoint_bytes: Option<u64>,
+    /// Checkpoints kept on disk behind this cache, when the tier is on.
+    ///
+    /// Holding a checkpoint here rather than there saves the 170–218 ms a read
+    /// costs, against the 70–114 seconds of re-reading the checkpoint itself
+    /// saves — a fifth of one percent. So this cache is a working set, not the
+    /// store: memory buys the turn in progress, and disk keeps everything else.
+    disk: Option<crate::prompt_cache_disk::CheckpointStore>,
 }
 
 /// What eviction dropped, minus the blob: enough to re-run prefix matching
@@ -641,9 +701,38 @@ const HOST_RAM_SHARE: u64 = 4;
 /// cache's to claim. Matches the offload planner's figure.
 const DESKTOP_RESERVE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
-/// Checkpoints the budget aims to hold: the conversation in progress, the
-/// predecessor a longest-prefix match needs, and one spare.
+/// Checkpoints the budget aims to hold when nothing is kept on disk: the
+/// conversation in progress, the predecessor a longest-prefix match needs, and
+/// one spare.
 const CHECKPOINTS_HELD: u64 = 3;
+
+/// Checkpoints the budget aims to hold when dropped ones go to disk. The
+/// conversation being served has its KV resident in the live context already —
+/// that is not a cache copy — so the memory tier's whole value is *other*
+/// conversations, and a read costs ~200 ms against the minute or more it saves.
+/// One is enough, and the rest of the reservation goes back to the machine
+/// (ADR 0042).
+const CHECKPOINTS_HELD_WITH_DISK: u64 = 1;
+
+/// On a clean exit, write whatever memory still holds to disk, so the
+/// conversation in progress does not cost a full cold prefill after a restart.
+///
+/// A restart throwing everything away was the single strongest finding behind
+/// the disk tier, and this is the trigger that answers it. Nothing else can:
+/// eviction writes only what memory drops, and the entry being served is never
+/// dropped. Runs once — the cache lives behind one `Arc`, so thin clones of the
+/// backend that share it do not each write.
+impl Drop for PromptStateCache {
+    fn drop(&mut self) {
+        if self.disk.is_none() {
+            return;
+        }
+        let written = self.persist_all();
+        if written > 0 {
+            debug!("prompt checkpoints: kept {written} for the next start");
+        }
+    }
+}
 
 /// The most this cache may claim on a machine with `host_available` bytes
 /// free — a share of what is left after the desktop's reserve, capped.
@@ -697,7 +786,8 @@ impl PromptStateCache {
     /// remedy is a shorter context, not a larger cache.
     pub fn resize_for_checkpoint(&mut self, checkpoint_bytes: u64, host_available: u64) -> usize {
         let ceiling = host_ceiling(host_available);
-        let want = checkpoint_bytes.saturating_mul(CHECKPOINTS_HELD);
+        let held = if self.disk.is_some() { CHECKPOINTS_HELD_WITH_DISK } else { CHECKPOINTS_HELD };
+        let want = checkpoint_bytes.saturating_mul(held);
         let bytes = usize::try_from(
             want.min(ceiling).max(u64::try_from(DEFAULT_MAX_BYTES).unwrap_or(u64::MAX)),
         )
@@ -730,7 +820,75 @@ impl PromptStateCache {
             pinned: HashSet::new(),
             tombstones: VecDeque::new(),
             checkpoint_bytes: None,
+            disk: None,
         }
+    }
+
+    /// Keep checkpoints this cache drops, and read them back when a later
+    /// prompt extends one.
+    ///
+    /// Attaching a store immediately sweeps it for checkpoints stored under a
+    /// runtime key that is no longer current — a different model, or a setting
+    /// that changes what a saved state means — because a startup is when that
+    /// is most likely to have happened, and those files can never match again.
+    pub fn attach_disk(
+        &mut self,
+        store: crate::prompt_cache_disk::CheckpointStore,
+        current_runtime: &str,
+    ) -> usize {
+        let dropped = store.sweep(current_runtime);
+        self.disk = Some(store);
+        dropped
+    }
+
+    /// The disk tier, if one is attached.
+    pub fn disk(&self) -> Option<&crate::prompt_cache_disk::CheckpointStore> {
+        self.disk.as_ref()
+    }
+
+    /// Read the deepest checkpoint on disk that extends nothing memory already
+    /// has, and admit it to memory so the caller can restore it as an ordinary
+    /// hit.
+    ///
+    /// Consulted only after a memory lookup came back shallower than
+    /// [`PrefixMissCause::Deepest`], so a warm turn never touches the disk. The
+    /// returned key is a hit in every sense — the entry is now resident — which
+    /// is what keeps every caller's restore path single.
+    pub fn promote_from_disk(
+        &mut self,
+        runtime: &str,
+        layers: &[PromptStateCacheLayer],
+        tokens: &[i32],
+        already_matched: usize,
+    ) -> Option<PromptStateCacheKey> {
+        let found = self.disk.as_ref()?.lookup(runtime, layers, tokens)?;
+        // A checkpoint no deeper than what memory already offers would cost a
+        // read and save nothing.
+        if found.prefix_tokens.len() <= already_matched {
+            return None;
+        }
+        let key = found.key.clone();
+        let entry = PromptStateCacheEntry::with_tokens(found.state, found.prefix_tokens);
+        self.insert(key.clone(), entry);
+        Some(key)
+    }
+
+    /// Write every resident checkpoint to disk.
+    ///
+    /// Called on a clean exit. Without it a restart throws away everything the
+    /// cache holds — measured as the largest single loss in the whole tier,
+    /// because an empty cache leaves no trace of what it used to have and the
+    /// cost is invisible rather than merely large.
+    ///
+    /// Returns how many files were written. Already-stored checkpoints write
+    /// nothing, so calling this twice is free.
+    pub fn persist_all(&self) -> usize {
+        let Some(disk) = self.disk.as_ref() else { return 0 };
+        self.entries
+            .iter()
+            .filter(|(_, e)| !e.prefix_tokens.is_empty())
+            .filter(|(k, e)| disk.store(k, &e.prefix_tokens, &e.state).unwrap_or(false))
+            .count()
     }
 
     /// Total bytes currently held across all entries, pinned included. This is
@@ -1062,6 +1220,12 @@ impl PromptStateCache {
             let Some(key) = self.lru.remove(pos) else { break };
             if let Some(entry) = self.entries.remove(&key) {
                 self.bytes = self.bytes.saturating_sub(entry.state.len());
+                // Hand it to disk on the way out. This is the case the whole
+                // tier exists for: the checkpoint is still wanted, memory just
+                // has no room for it.
+                if let Some(disk) = self.disk.as_ref() {
+                    let _ = disk.store(&key, &entry.prefix_tokens, &entry.state);
+                }
                 self.remember_evicted(&key, &entry);
                 evicted.push(EvictedEntry {
                     layer: key.layer.clone(),
@@ -1278,6 +1442,83 @@ mod tests {
                 layer: PromptStateCacheLayer::F8ChatPrefix,
             }
         );
+    }
+
+    /// A scratch directory under `target/`, never under `/tmp`: that is `tmpfs`
+    /// on many systems and the store refuses a directory held in memory, so a
+    /// test using it would exercise the refusal instead of the tier.
+    fn disk_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../target/ckpt-tests"
+        ))
+        .join(format!("wire-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn a_checkpoint_the_budget_drops_lands_on_disk_and_comes_back() {
+        // The whole tier in one turn: memory runs out, the checkpoint goes to
+        // disk on the way out, and a later prompt extending it reads back as an
+        // ordinary resident hit.
+        let dir = disk_dir("evict-roundtrip");
+        let store =
+            crate::prompt_cache_disk::CheckpointStore::open(dir.clone(), 10 * 1024 * 1024).unwrap();
+        let mut cache = PromptStateCache::new(10, 1024);
+        cache.attach_disk(store, "runtime");
+
+        let (k1, e1) = tokened("turn-1", &[1, 2, 3, 4], 900);
+        cache.insert(k1.clone(), e1);
+        let (k2, e2) = tokened("other", &[7, 7, 7], 900);
+        cache.insert(k2, e2);
+        assert!(!cache.contains(&k1), "the budget must have dropped turn-1");
+
+        let promoted = cache
+            .promote_from_disk("runtime", &CHAT, &[1, 2, 3, 4, 5], 0)
+            .expect("the evicted checkpoint is readable again");
+        assert_eq!(promoted, k1);
+        assert!(cache.contains(&k1), "promotion makes it resident, so restore is one path");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_shallower_checkpoint_on_disk_is_not_worth_reading() {
+        // Reading a checkpoint no deeper than what memory already offers costs
+        // a read and saves nothing.
+        let dir = disk_dir("no-gain");
+        let store =
+            crate::prompt_cache_disk::CheckpointStore::open(dir.clone(), 10 * 1024 * 1024).unwrap();
+        let mut cache = PromptStateCache::new(10, 1024);
+        cache.attach_disk(store, "runtime");
+        let (k1, e1) = tokened("turn-1", &[1, 2, 3, 4], 900);
+        cache.insert(k1, e1);
+        assert_eq!(cache.persist_all(), 1);
+
+        assert!(
+            cache.promote_from_disk("runtime", &CHAT, &[1, 2, 3, 4, 5], 4).is_none(),
+            "a four-token checkpoint adds nothing to a four-token match"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_clean_exit_writes_what_a_restart_would_otherwise_lose() {
+        // The largest measured loss in the tier: a restart empties the cache
+        // and leaves no trace of what it held, so the cost is invisible rather
+        // than merely large. Writing on exit is the whole remedy.
+        let dir = disk_dir("persist-all");
+        let store =
+            crate::prompt_cache_disk::CheckpointStore::open(dir.clone(), 10 * 1024 * 1024).unwrap();
+        let mut cache = PromptStateCache::new(10, 1024 * 1024);
+        cache.attach_disk(store, "runtime");
+        for i in 0..3 {
+            let (k, e) = tokened(&format!("turn-{i}"), &[1, 2, i], 64);
+            cache.insert(k, e);
+        }
+        assert_eq!(cache.persist_all(), 3, "every resident checkpoint is written");
+        assert_eq!(cache.persist_all(), 0, "a second call rewrites nothing");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1648,5 +1889,49 @@ mod tests {
             Some(key(PromptStateCacheLayer::HistoryPrefix, "read")),
             "fell back to the 2-token pin and re-read everything else"
         );
+    }
+
+    /// The RAM the tier hands back. With nowhere to put what it drops, memory
+    /// has to hold the predecessors a longest-prefix match needs; with disk
+    /// attached it only has to hold the conversation being served, and the rest
+    /// of the reservation goes back to the machine (ADR 0042).
+    #[test]
+    fn attaching_disk_shrinks_the_memory_reservation() {
+        let checkpoint = 2 * 1024 * 1024 * 1024_u64; // 2 GB, so the floor cannot bind
+        let free = 64 * 1024 * 1024 * 1024_u64;
+
+        let mut memory_only = PromptStateCache::new(8, usize::MAX);
+        let without = memory_only.resize_for_checkpoint(checkpoint, free);
+
+        let dir = disk_dir("shrink");
+        let mut with_disk = PromptStateCache::new(8, usize::MAX);
+        let store =
+            crate::prompt_cache_disk::CheckpointStore::open(dir.clone(), 8 * checkpoint).unwrap();
+        with_disk.attach_disk(store, "runtime");
+        let with = with_disk.resize_for_checkpoint(checkpoint, free);
+
+        assert_eq!(without as u64, 3 * checkpoint);
+        assert_eq!(with as u64, checkpoint, "disk attached, so memory keeps one");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A restart throwing everything away was the strongest single argument for
+    /// the tier, and eviction cannot answer it: the entry being served is never
+    /// dropped. A clean exit has to write it.
+    #[test]
+    fn a_clean_exit_keeps_what_memory_still_holds() {
+        let dir = disk_dir("exit");
+        let store = crate::prompt_cache_disk::CheckpointStore::open(dir.clone(), 1 << 30).unwrap();
+        {
+            let mut cache = PromptStateCache::new(8, usize::MAX);
+            cache.attach_disk(store, "runtime");
+            let (k, e) = tokened("live", &[1, 2, 3], 64);
+            cache.insert(k, e);
+            assert_eq!(cache.disk().unwrap().usage().1, 0, "nothing written while it is held");
+        }
+        let reopened =
+            crate::prompt_cache_disk::CheckpointStore::open(dir.clone(), 1 << 30).unwrap();
+        assert_eq!(reopened.usage().1, 1, "the conversation in progress survived the exit");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

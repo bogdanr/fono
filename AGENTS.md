@@ -224,6 +224,24 @@ section is the durable backup in case the skill is unavailable.
   "Replace score smoother with sliding-window activation gate". Keep jargon,
   type/function names, and implementation detail out of the subject line; if
   such detail is useful, put it lower in the body. This rule is permanent.
+
+  **Plain does not mean vague — prefer the precise word.** "Plain language"
+  bans *our* internal vocabulary (type names, module names, private
+  abstractions), not the domain's ordinary vocabulary. When a term is the
+  accurate name for the thing, use it: **token**, not "word"; **prefix**, not
+  "the start of the conversation"; **evict**, not "drop"; **GPU** / **disk** /
+  **cache**, not periphrases for them. Paraphrasing a precise term into an
+  approximate one is worse than jargon, because it is wrong: "32,000 words were
+  re-read" states a different fact from "32,000 prefix tokens were re-decoded".
+  A reader who does not know a term can look it up; a reader given the wrong
+  quantity cannot recover it. Explain a term once in-line if it earns it, then
+  use it.
+
+  **Write flat, not literary.** No elevated or archaic register where the
+  ordinary word exists — "14 days", never "a fortnight"; "about", never "circa";
+  "so", never "hence". Give numbers as numerals with units (`4 GiB`, `70 to 114
+  seconds`, `32,000`), not spelled out. The register to aim for is a competent
+  colleague's changelog entry, not prose.
 - **Commit messages MUST be to the point.** Length is not the rule — a commit
   that does several things needs the lines to say so, and most of ours do. The
   rule is that every line must be pulling. Write the body to Orwell's six rules
@@ -237,6 +255,12 @@ section is the durable backup in case the skill is unavailable.
   5. Never use a foreign phrase, a scientific word or a jargon word if you can
      think of an everyday English equivalent.
   6. Break any of these rules sooner than say anything outright barbarous.
+
+  Read rules 2 and 5 with the precision clause above: they forbid the long word
+  and the jargon word *when a plain equivalent says the same thing*. They do
+  not license swapping a term for a near-synonym that says something else.
+  Rule 6 settles the conflict — an accurate technical term beats an inaccurate
+  everyday one every time.
 
   Rule 3 applies to whole paragraphs, not only words. What is nearly always
   cuttable: the reasoning that led to the design, rejected alternatives,
