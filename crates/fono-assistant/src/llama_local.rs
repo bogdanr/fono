@@ -596,7 +596,7 @@ impl LlamaLocalAssistant {
     /// nothing — whenever the split cannot be reused safely (empty prefix/suffix,
     /// token-boundary mismatch, oversized prompt, or a failed restore) so the
     /// caller can fall back to a full prefill.
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
     fn generate_with_prefix_cache<F>(
         &self,
         model: &LlamaModel,
