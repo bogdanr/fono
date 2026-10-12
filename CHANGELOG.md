@@ -7,6 +7,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-10-12
+
+### Added
+
+- **The first start now helps you connect a free cloud service.** Starting Fono
+  from the app menu used to skip setup, so new users only got local models. The
+  first start now opens a welcome screen in your browser with one card per free
+  service (Groq and Gemini today), "This computer", and a field to paste a key
+  you already have. Fono works out the service from the key, tests it, and sets
+  everything up from it. A saved key that still works is offered first, so a
+  reinstall never needs a new key. OpenRouter connects with one click. For other
+  services Fono opens the key page and picks the key up when you copy it,
+  watching the clipboard for 2 minutes and for that one service's key only.
+  `fono setup` asks the same question in the terminal, and the tray's "Connect a
+  service…" reopens the welcome screen. Connecting a service never turns on the
+  assistant and never removes local models.
+
+- **Coming back to an older assistant conversation is quick again.** Fono kept
+  a few conversations in memory and dropped the rest, so returning to a dropped
+  one re-read the whole prefix: 70 to 114 seconds, against 4 for one still in
+  memory. A restart paid that for every conversation. Fono now writes a
+  conversation to disk when it evicts it and on clean shutdown, and returning
+  costs about a second. The disk space used is sized to the model, at most
+  4 GiB unless you set it yourself, and copies unused for 14 days are deleted.
+  The settings page and `fono doctor` show how much is stored.
+
+- **Local models use the GPU whenever the whole model fits.** Fono now checks
+  each local model against free GPU memory and puts the whole model on the GPU
+  when it fits, or runs it on the processor when it doesn't. Before, the cleanup
+  model could fail to load on a small graphics card, while the assistant never
+  used the GPU and ran at about half speed. `fono doctor` shows the decision and
+  the numbers behind it.
+
+### Changed
+
+- **Long assistant conversations no longer fail.** Prompts longer than one batch
+  were refused; now only the model's context limit applies.
+- **Coding tools using the local API get full-length replies**, up to a quarter
+  of the context window, instead of being cut off after a few hundred words.
+- **A remembered conversation takes half the memory** (`q8_0` KV cache).
+- **Tool calls through the local chat API work properly.** Tool results and the
+  calls behind them are no longer dropped, and replies come back as tool calls.
+
+### Fixed
+
+- **Dictated text is no longer lost when the typing tool fails.** If ydotool,
+  wtype or xdotool failed, Fono reported the text as typed. It now falls back to
+  the clipboard.
+- **A hyphen in ordinary words** ("a well-known fix") no longer switches cleanup
+  into shell-command mode.
+- **Fono shuts down cleanly** on `systemctl stop`, logout, system shutdown and
+  tray Quit, so saved conversations reach disk and the LAN announcement is
+  withdrawn.
+- **A failed `fono update` no longer leaves you without a `fono` binary.**
+- **A resumed model download no longer corrupts the model** when the server
+  ignores the resume request.
+- **Intel graphics driver crashes no longer take Fono down every time.** After
+  one, the next start runs on the processor and says why; the start after that
+  uses the GPU again.
+- **The one-line installer works on Macs.** It used to download the Linux
+  binary, which macOS refuses to run with "cannot execute binary file".
+- The tray's "Pause hotkeys" item did nothing and has been removed.
+
+### Security
+
+- **The LAN speech server now enforces its token.** `[server.wyoming]
+  auth_token_ref` was accepted but never checked, so any device on the network
+  could use the machine. A missing or wrong token is now refused; local
+  connections without a token still work. **If you set a token, Home Assistant
+  on another machine is now refused**, because it cannot send one; leave the
+  token empty in that setup. Tokens saved with `fono keys` are now read too.
+
 ## [0.18.1] — 2026-08-06
 
 ### Added

@@ -21,6 +21,14 @@ The home page is [fono.page](https://fono.page).
 
 ![Recently shipped](https://img.shields.io/badge/Recently_shipped-6e7681?style=for-the-badge)
 
+**[v0.19.0 — A guided first start, and conversations kept on disk](#shipped)**  
+The first start opens a welcome screen that connects a free cloud service from
+one key, or keeps everything on this computer. Older assistant conversations are
+saved to disk, so returning to one takes about a second instead of over a
+minute. Local models run on the GPU whenever they fit. Also: dictated text is no
+longer lost when typing fails, the LAN speech server enforces its token, and the
+one-line installer works on Macs. *(2026-10-12)*
+
 **[v0.18.1 — See what the assistant keeps warm](#shipped)**  
 Fono holds on to the work it has already done on a conversation so your next
 sentence starts warm instead of paying for the whole prompt again. Settings now
@@ -313,6 +321,20 @@ assistant provider.
 ## Shipped
 
 Newest first.
+
+- ![v0.19.0](https://img.shields.io/badge/v0.19.0-2026--10--12-blue?style=flat-square)
+  **A guided first start.** The first start opens a welcome screen in the
+  browser: one card per free cloud service (Groq and Gemini), "This computer",
+  and a field to paste a key you already have. Fono works out the service from
+  the key, tests it and sets everything up. `fono setup` asks the same question
+  in the terminal, and the tray's "Connect a service…" reopens it.
+
+  Also: assistant conversations evicted from memory are saved to disk, so
+  returning to one takes about a second instead of 70 to 114 seconds; local models run
+  entirely on the GPU when they fit; long conversations and tool calls work over
+  the local API; dictated text falls back to the clipboard when typing fails;
+  the LAN speech server enforces its token; Fono shuts down cleanly; and the
+  one-line installer installs the macOS build on a Mac.
 
 - ![v0.18.1](https://img.shields.io/badge/v0.18.1-2026--08--06-blue?style=flat-square)
   **See what the assistant keeps warm.** The embedded engine keeps the work it
