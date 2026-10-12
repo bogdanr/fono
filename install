@@ -13,10 +13,11 @@
 #   1. Detects host OS + architecture and the latest Fono release.
 #   2. Downloads the matching prebuilt binary into a temp dir.
 #   3. Runs `fono install` so the self-installer places the binary and
-#      wires autostart: on Linux/macOS via `sudo fono install` (desktop)
-#      or `sudo fono install --server` (headless); on Windows per-user
-#      with no elevation (a login autostart entry under HKCU, no server
-#      mode).
+#      wires autostart: on Linux via `sudo fono install` (desktop) or
+#      `sudo fono install --server` (headless); on macOS and Windows
+#      per-user with no elevation and no server mode (a LaunchAgent /
+#      .app bundle on macOS, a login autostart entry under HKCU on
+#      Windows).
 #
 # Environment knobs:
 #   FONO_VERSION=vX.Y.Z       pin to a specific release tag
@@ -79,6 +80,18 @@ case "$(uname -s)" in
     *) err "unsupported OS: $(uname -s)" ;;
 esac
 EXE=""
+SUFFIX=""
+if [ "$OS" = macos ]; then
+    # A shell running under Rosetta reports x86_64 on Apple Silicon;
+    # ask the kernel what the hardware actually is.
+    if [ "$(sysctl -n hw.optional.arm64 2>/dev/null || true)" = 1 ]; then
+        ARCH=aarch64
+    fi
+    [ "$ARCH" = aarch64 ] || err "Fono for macOS needs Apple Silicon (this Mac reports $arch)"
+    SUFFIX="-apple-darwin"
+    FONO_MODE=desktop    # the macOS installer refuses --server
+    FONO_VARIANT=cpu     # single macOS binary (Metal built in)
+fi
 if [ "$OS" = windows ]; then
     EXE=".exe"
     ARCH=x86_64          # only an x86_64 Windows asset is published
@@ -135,10 +148,10 @@ else
     [ -n "$TAG" ] || err "could not resolve latest release from $TAG_URL"
 fi
 
-ASSET="${ASSET_PREFIX}-${TAG}-${ARCH}${EXE}"
+ASSET="${ASSET_PREFIX}-${TAG}-${ARCH}${SUFFIX}${EXE}"
 URL="https://github.com/$REPO/releases/download/${TAG}/${ASSET}"
 
-log "host:    $ARCH"
+log "host:    $OS $ARCH"
 log "mode:    $MODE"
 log "variant: $VARIANT"
 log "release: $TAG"
@@ -185,10 +198,12 @@ if [ -n "${FONO_INSTALL_NO_START:-}" ]; then
     INSTALL_ENV="FONO_INSTALL_NO_START=$FONO_INSTALL_NO_START"
 fi
 
-# Windows: per-user install, no elevation, no server mode. `fono
-# install` copies the .exe under %LOCALAPPDATA% and writes the login
-# autostart entry itself.
-if [ "$OS" = windows ]; then
+# macOS and Windows: per-user install, no elevation, no server mode.
+# `fono install` builds ~/Applications/Fono.app plus a LaunchAgent on
+# macOS, or copies the .exe under %LOCALAPPDATA% with a login autostart
+# entry on Windows. Running it under sudo would install into root's
+# home instead of the user's.
+if [ "$OS" = windows ] || [ "$OS" = macos ]; then
     if [ -r /dev/tty ] && [ -w /dev/tty ]; then
         # shellcheck disable=SC2086
         env $INSTALL_ENV "$BIN" install </dev/tty
