@@ -322,6 +322,17 @@ assistant provider.
 
 Newest first.
 
+- ![v0.20.0](https://img.shields.io/badge/v0.20.0-2026--11--06-blue?style=flat-square)
+  **Fono as a Home Assistant voice app.** One app serves speech-to-text,
+  text-to-speech, the wake word and a conversation agent that controls the
+  devices you expose to Assist, with the settings page in Home Assistant's
+  sidebar. Speech starts sooner: replies are spoken piece by piece, so first
+  audio comes after about 0.7 s instead of 2.8 s.
+
+  Also: languages can come from Home Assistant; Fono runs on CPUs without AVX2
+  with local speech-to-text off; the OpenAI-compatible speech and chat
+  endpoints accept any model name; and LAN adverts are fixed.
+
 - ![v0.19.0](https://img.shields.io/badge/v0.19.0-2026--10--12-blue?style=flat-square)
   **A guided first start.** The first start opens a welcome screen in the
   browser: one card per free cloud service (Groq and Gemini), "This computer",

@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] — 2026-11-06
+
+### Added
+
+- **Fono runs as a Home Assistant app.** It can serve speech-to-text,
+  text-to-speech, the wake word and a conversation agent to Home Assistant,
+  together or separately (`[server.wyoming] services`, or the boxes on the
+  settings page). The settings page works in Home Assistant's sidebar.
+- **The conversation agent controls your devices.** Fono reaches Home
+  Assistant's MCP server at `…/api/mcp` as well as `…/mcp_server/sse`, and
+  understands Home Assistant's namespaced tool names, so it knows the house's
+  devices and areas. `fono config home-assistant <url>` sets this up. Each Home
+  Assistant conversation keeps its own short history.
+- **`fono config languages`** sets the languages, or reads them from Home
+  Assistant: the preferred voice assistant's, Home Assistant's own, the other
+  voice assistants', then English.
+- **`fono keys connect`** saves a pasted API key and sets Fono up to use that
+  provider.
+- With a cloud text-to-speech provider, Fono lists that provider's voices over
+  Wyoming.
+
+### Changed
+
+- **Speech starts sooner.** Fono speaks a reply piece by piece and sends each
+  piece's audio as soon as it is made, over Wyoming and `/v1/audio/speech`. On a
+  Home Assistant box, first audio for an 18 s reply came after 0.7 s instead of
+  2.8 s. Fono also supports Home Assistant's streamed text-to-speech, so it
+  starts speaking while the reply is still being written.
+- A streamed WAV has no length in its header. Clients that need the length can
+  ask for `response_format: pcm`.
+- `/v1/audio/speech` accepts any `model`. A provider name selects that provider,
+  with its own default voice, model and key; anything else, such as `tts-1`,
+  uses the configured one.
+- `/v1/chat/completions` sends the configured model upstream when the client
+  asks for `fono` or a model the provider doesn't list.
+
+### Fixed
+
+- **Fono no longer crashes on CPUs without AVX2**, such as an Intel Atom. Local
+  speech-to-text and language models turn off and say so; cloud providers,
+  local text-to-speech and the wake word keep working.
+- A command that changed the wrong device ("turn on the basement lights"
+  lighting another lamp) is no longer saved as a shortcut.
+- A text-to-speech failure, such as a provider's rate limit, reaches Home
+  Assistant as an error instead of a closed connection.
+- Cloud voices no longer fail when a request picks a different provider than
+  the configured one: the configured voice, model and key stayed attached.
+- The LAN advert says a key is required when `[server.llm] auth` is on, no
+  longer goes out on Docker, VM bridge or IPv6 link-local addresses, and no
+  longer stops when the hostname can't be read from `$HOSTNAME` or
+  `/etc/hostname`.
+
 ## [0.19.0] — 2026-10-12
 
 ### Added
