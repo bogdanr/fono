@@ -39,6 +39,7 @@ pub mod variant;
 pub mod wake;
 pub mod welcome;
 pub mod wizard;
+pub mod wyoming_handle;
 
 #[cfg(feature = "interactive")]
 pub mod live;

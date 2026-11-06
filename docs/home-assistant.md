@@ -55,12 +55,24 @@ endpoint answers on `10300`. Models persist across restarts because
 
 | Service | Default | Notes |
 | --- | --- | --- |
-| Speech-to-text | local Whisper `small` | always served |
-| Text-to-speech | local Piper | served automatically whenever a TTS backend is set; `local` is the default |
+| Speech-to-text | local Whisper `small` | on unless left out of `FONO_SERVICES` |
+| Text-to-speech | local Supertonic | on whenever a TTS backend is set, unless left out of `FONO_SERVICES` |
+| Wake word | the default wake phrase | on unless left out of `FONO_SERVICES` |
 | Languages | `en` | comma-separated, e.g. `en,ro` |
 | Listener | `0.0.0.0:10300` | the Wyoming/Home Assistant port |
 
 No API keys, no internet calls — everything runs on the box.
+
+**Pick only what you need.** Home Assistant creates one entity per
+service Fono offers. To use Fono for speech-to-text but keep Piper for
+speech, set `FONO_SERVICES=asr`, or in `config.toml`:
+
+```toml
+[server.wyoming]
+services = ["asr"]     # any of "asr", "tts", "wake", "handle"
+```
+
+Then reload the Wyoming entry in Home Assistant.
 
 ## Connect Home Assistant
 
@@ -115,6 +127,20 @@ pipeline.
 > > `fono doctor` prints a prominent warning whenever it is active. Prefer
 > > the automatic server direction unless you have a specific reason to
 > > centralise wake detection elsewhere.
+
+## Use Fono's assistant as the conversation agent
+
+When Fono's assistant is set up (`[assistant]`), the Wyoming listener
+also offers it as a **conversation agent**. Home Assistant shows it as
+**Fono** under **Settings → Voice assistants → Conversation agent**. Fono
+then answers with its own model, prompt and tools. If Fono's tools
+include Home Assistant (`[[assistant.tools.mcp]]`), Fono switches devices
+itself and Home Assistant lists the agent as able to control the home.
+Each Home Assistant conversation keeps its own short history.
+
+Leave `handle` out of `[server.wyoming].services` to keep Home
+Assistant's own agent. The next section covers the other way round:
+Home Assistant's agent, with Fono providing only the model.
 
 ## Use Fono as a local LLM (Ollama conversation agent)
 
@@ -208,6 +234,9 @@ environment on **every** start, so editing your compose file and running
 | `FONO_STT_BACKEND` | `local` | `local` or a cloud provider (see below) |
 | `FONO_TTS_BACKEND` | `local` | `local` Piper, a cloud provider, or `none` to disable TTS |
 | `FONO_TTS_LOCAL_VOICE` | (auto) | a Piper voice, e.g. `en_US-amy-medium` |
+| `FONO_SERVICES` | `asr,tts,wake,handle` | which services Home Assistant sees; leave one out to use another engine for it |
+| `FONO_LLM_ENABLED` | `false` | serve the Ollama-compatible LLM API on `11434` (remote callers need an API key) |
+| `FONO_WEB_ENABLED` | `false` | serve the web settings page on `10808` (remote callers need an API key) |
 | `FONO_CONTAINER_WRITE_CONFIG` | `missing` | `always` regenerates config from env each start |
 
 ### Cloud backends (optional)

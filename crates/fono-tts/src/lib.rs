@@ -13,6 +13,7 @@
 
 pub mod defaults;
 pub mod factory;
+pub mod pieces;
 pub mod sentence_split;
 pub mod streaming;
 pub mod traits;
@@ -68,6 +69,7 @@ pub mod supertonic;
 pub mod voices;
 
 pub use factory::build_tts;
+pub use pieces::{synthesize_arriving_text, synthesize_in_pieces, Pieces};
 pub use sentence_split::SentenceSplitter;
 pub use streaming::{stream_utterance, PcmSink};
 pub use traits::{TextToSpeech, TtsAudio, TtsChunk};

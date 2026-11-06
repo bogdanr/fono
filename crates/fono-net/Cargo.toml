@@ -22,7 +22,7 @@ default = ["wyoming-server", "discovery", "llm-server", "web-settings"]
 # `Arc<dyn SpeechToText>` (whisper-rs, cloud, …).
 wyoming-server = []
 # mDNS / DNS-SD browser + advertiser. Slice 4 of the network plan.
-discovery = ["dep:mdns-sd"]
+discovery = ["dep:mdns-sd", "dep:if-addrs"]
 # Local LLM inference HTTP server — OpenAI- + Ollama-compatible endpoints
 # driving an existing `Arc<dyn Assistant>` (embedded llama.cpp, cloud, …).
 # Raw hyper, hand-rolled router, no axum (ADR 0036). The hyper/http-body
@@ -64,6 +64,7 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 mdns-sd = { workspace = true, optional = true }
+if-addrs = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

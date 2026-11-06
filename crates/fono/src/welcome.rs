@@ -608,4 +608,25 @@ mod tests {
         assert_eq!(c.stt.local.model, "small");
         assert_eq!(c.assistant.enabled, assistant_before, "the assistant stays opt-in");
     }
+
+    #[test]
+    fn a_conversation_agent_server_takes_the_first_key_for_its_assistant() {
+        let groq = provider_catalog::find("groq").unwrap();
+        let mut c = Config::default();
+        c.server.wyoming.enabled = true;
+        crate::wizard::connect_provider(&mut c, groq);
+        assert!(c.assistant.enabled);
+        assert_eq!(c.assistant.backend, LlmBackend::Groq);
+
+        // A second key does not take over an assistant already set up.
+        crate::wizard::connect_provider(&mut c, provider_catalog::find("cerebras").unwrap());
+        assert_eq!(c.assistant.backend, LlmBackend::Groq);
+
+        // Without the conversation service, the assistant stays opt-in.
+        let mut c = Config::default();
+        c.server.wyoming.enabled = true;
+        c.server.wyoming.services = vec![fono_core::config::WyomingService::Asr];
+        crate::wizard::connect_provider(&mut c, groq);
+        assert!(!c.assistant.enabled);
+    }
 }

@@ -40,6 +40,28 @@ pub fn encode_wav(pcm: &[f32], sample_rate: u32) -> Vec<u8> {
     out
 }
 
+/// The header of a 16-bit mono WAV whose length is not known yet, for
+/// audio sent while it is still being made. The RIFF and data sizes are set
+/// to the largest value, which players read as "until the stream ends".
+#[must_use]
+pub fn streaming_wav_header(sample_rate: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(44);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&u32::MAX.to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&sample_rate.to_le_bytes());
+    out.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+    out.extend_from_slice(&2u16.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&u32::MAX.to_le_bytes());
+    out
+}
+
 /// Encode mono `f32` samples as raw little-endian 16-bit PCM (no header),
 /// the OpenAI `response_format = "pcm"` shape (signed 16-bit, mono).
 #[must_use]

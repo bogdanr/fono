@@ -39,7 +39,7 @@ tray = ["fono-tray/tray-backend"]
 # to `fono-assistant/realtime`. Default-on; the Live client's WebSocket
 # dependency (tokio-tungstenite) is already in the binary graph, so this
 # is net-zero on binary size.
-realtime = ["fono-assistant/realtime"]
+realtime = ["fono-assistant/realtime", "dep:tokio-tungstenite"]
 local-models = ["fono-stt/whisper-local"]
 llama-local = ["fono-polish/llama-local", "fono-assistant/llama-local", "fono-mcp-server/llama-local"]
 # Hardware acceleration features — fan out to the matching opt-in
@@ -191,6 +191,9 @@ once_cell = { workspace = true }
 regex = { workspace = true }
 futures = { workspace = true }
 tokio-stream = { workspace = true, optional = true }
+# Home Assistant websocket API (`fono config languages --from-home-assistant`).
+# Already linked through fono-assistant's realtime client, so net-zero on size.
+tokio-tungstenite = { workspace = true, optional = true }
 # Real-input FFT for the `fft` and `heatmap` waveform styles. Small
 # (no_std-capable) and cheap; only invoked from the level-ticker task
 # when the standalone waveform overlay is active.

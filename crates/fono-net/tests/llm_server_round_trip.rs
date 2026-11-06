@@ -437,7 +437,7 @@ async fn proxy_chat_forwards_client_model_verbatim() {
     let client = reqwest::Client::new();
 
     let req = serde_json::json!({
-        "model": "client-chosen",
+        "model": "up-model-b",
         "stream": false,
         "messages": [{ "role": "user", "content": "hi" }],
     });
@@ -450,12 +450,27 @@ async fn proxy_chat_forwards_client_model_verbatim() {
         .expect("request");
     assert_eq!(resp.status(), 200);
     let body: Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
-    // The upstream echoed the model it received: the client's choice was
-    // honoured verbatim (not overridden by the server default).
-    assert_eq!(body["model"], "client-chosen");
+    // The upstream echoed the model it received: a model the upstream
+    // lists is honoured verbatim (not overridden by the server default).
+    assert_eq!(body["model"], "up-model-b");
     assert_eq!(body["choices"][0]["message"]["content"], "from-upstream");
     // The provider key was injected on the outbound leg.
     assert_eq!(body["echo_auth"], "Bearer sk-key");
+
+    // `fono`, the name Fono advertises, and a model the upstream doesn't
+    // list both mean the configured model.
+    for model in ["fono", "client-chosen"] {
+        let req = serde_json::json!({ "model": model, "messages": [{ "role": "user", "content": "hi" }] });
+        let resp = client
+            .post(format!("{base}/v1/chat/completions"))
+            .header("content-type", "application/json")
+            .body(req.to_string())
+            .send()
+            .await
+            .expect("request");
+        let body: Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
+        assert_eq!(body["model"], "default-model", "{model}");
+    }
 
     handle.shutdown().await;
     up_join.abort();

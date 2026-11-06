@@ -130,6 +130,10 @@ impl GgmlDevice {
 /// answers, not failures.
 #[must_use]
 pub fn devices() -> Vec<GgmlDevice> {
+    // Starting the backend runs CPU code this CPU may not support.
+    if crate::hwcheck::local_models_unsupported().is_some() {
+        return Vec::new();
+    }
     // The backend singleton must exist before the device registry is read:
     // registration happens during backend init, and querying first would
     // report an empty machine.

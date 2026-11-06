@@ -131,14 +131,46 @@ pub type PromptCacheFn =
     Arc<dyn Fn() -> std::result::Result<serde_json::Value, String> + Send + Sync>;
 /// OpenAI-compatible `POST /v1/audio/speech` handler. Takes the parsed
 /// request body (`{model, input, voice, response_format?}`) and returns the
-/// synthesized audio as `(content_type, bytes)` — WAV or raw PCM. Async: the
-/// daemon side builds the requested engine and runs synthesis off the accept
-/// loop. Errors are surfaced as an OpenAI-shaped 4xx/5xx by the caller.
+/// content type plus the audio as a stream of bytes — WAV or raw PCM — that
+/// yields each piece as soon as it is synthesised. An error before any audio
+/// is surfaced as an OpenAI-shaped 4xx by the caller; once audio has started
+/// the stream simply ends, since the status line has already gone out.
 pub type SpeechFn = Arc<
-    dyn Fn(serde_json::Value) -> BoxFuture<'static, std::result::Result<(String, Vec<u8>), String>>
+    dyn Fn(serde_json::Value) -> BoxFuture<'static, std::result::Result<SpeechAudio, String>>
         + Send
         + Sync,
 >;
+
+/// What a [`SpeechFn`] returns: the content type and the audio bytes as
+/// they are produced.
+pub type SpeechAudio = (String, futures::stream::BoxStream<'static, Vec<u8>>);
+
+/// A streamed audio response. Dropping it (the client hung up) drops the
+/// stream, which stops synthesis.
+pub(crate) fn speech_response(audio: SpeechAudio) -> Response<BoxBody<Bytes, Infallible>> {
+    use futures::StreamExt;
+    let (content_type, mut stream) = audio;
+    // A task drives the synthesis and hands each piece to the body. When
+    // the client goes away the send fails and the task, and with it the
+    // synthesis, stops.
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Bytes>(4);
+    tokio::spawn(async move {
+        while let Some(piece) = stream.next().await {
+            if tx.send(Bytes::from(piece)).await.is_err() {
+                break;
+            }
+        }
+    });
+    let frames = futures::stream::poll_fn(move |cx| {
+        rx.poll_recv(cx).map(|b| b.map(|b| Ok::<_, Infallible>(hyper::body::Frame::data(b))))
+    });
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(hyper::header::CONTENT_TYPE, content_type)
+        .header(hyper::header::CACHE_CONTROL, "no-store")
+        .body(BodyExt::boxed(http_body_util::StreamBody::new(frames)))
+        .expect("static response builder")
+}
 
 /// List all inbound API keys as JSON (metadata only — never secrets):
 /// `{"keys": [{id, name, masked, created_at, expires_at, last_used_at,
@@ -418,6 +450,9 @@ pub struct WebSettingsConfig {
     /// When `true`, refuses non-loopback peers even if the bind address
     /// would have allowed them. Set when `bind = "127.0.0.1"`.
     pub loopback_only: bool,
+    /// A reverse proxy trusted like a loopback caller, such as Home
+    /// Assistant's ingress proxy. Its users have already signed in there.
+    pub trusted_proxy: Option<std::net::IpAddr>,
 }
 
 impl Default for WebSettingsConfig {
@@ -427,6 +462,7 @@ impl Default for WebSettingsConfig {
             port: DEFAULT_PORT,
             auth_enabled: true,
             loopback_only: true,
+            trusted_proxy: None,
         }
     }
 }
@@ -601,7 +637,7 @@ fn admit(req: &Request<Incoming>, peer: SocketAddr, ctx: &ServerCtx) -> Option<R
     let presented = presented_token(req);
     match crate::auth::decide(
         ctx.cfg.auth_enabled,
-        is_loopback(&peer),
+        is_loopback(&peer) || ctx.cfg.trusted_proxy == Some(peer.ip()),
         presented.as_deref(),
         ctx.verifier.as_ref(),
     ) {
@@ -720,7 +756,7 @@ async fn route(req: Request<Incoming>, peer: SocketAddr, ctx: ServerCtx) -> Resp
                 return openai_error(StatusCode::BAD_REQUEST, "invalid or oversized JSON body");
             };
             match (ctx.hooks.speak)(body).await {
-                Ok((content_type, bytes)) => audio_response(content_type, bytes),
+                Ok(audio) => speech_response(audio),
                 Err(e) => openai_error(StatusCode::BAD_REQUEST, &e),
             }
         }
@@ -1240,16 +1276,6 @@ fn openai_error(status: StatusCode, msg: &str) -> Response<ResBody> {
         .status(status)
         .header(hyper::header::CONTENT_TYPE, "application/json")
         .body(full(Bytes::from(body)))
-        .expect("static response builder")
-}
-
-/// Binary audio response (WAV or raw PCM) for `/v1/audio/speech`.
-fn audio_response(content_type: String, bytes: Vec<u8>) -> Response<ResBody> {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(hyper::header::CONTENT_TYPE, content_type)
-        .header(hyper::header::CACHE_CONTROL, "no-store")
-        .body(full(Bytes::from(bytes)))
         .expect("static response builder")
 }
 

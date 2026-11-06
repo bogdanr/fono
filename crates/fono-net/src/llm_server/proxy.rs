@@ -9,14 +9,18 @@
 //! through untouched — for near-zero code, and unlocks cloud
 //! tool-calling (the Home Assistant device-control path).
 //!
-//! The only mutation Fono makes to the request body is defaulting the
-//! `model` field when the client omits it; the API key is injected on
+//! The only mutation Fono makes to the request body is the `model` field:
+//! it is filled in when the client omits it, and replaced when it names
+//! no model the upstream offers (such as `fono`, the name Fono advertises
+//! for its own assistant). The API key is injected on
 //! the outbound leg (never exposed to the client). The adapter remains
 //! the universal floor for everything that is not proxyable (local
 //! llama.cpp, Anthropic, realtime, and the Ollama-native surface).
 
+use std::collections::HashSet;
 use std::convert::Infallible;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use fono_assistant::CloudUpstream;
@@ -34,9 +38,10 @@ fn client() -> &'static reqwest::Client {
     CLIENT.get_or_init(reqwest::Client::new)
 }
 
-/// Apply the *only* mutation Fono makes to a proxied request body:
-/// default `model` when the client omitted or blanked it. Returns the
-/// effective model, for the access log.
+/// Apply the *only* mutation Fono makes to a proxied request body: set
+/// `model` to `fallback` when the client omitted or blanked it, or when
+/// `offered` says the upstream has no such model. Returns the effective
+/// model, for the access log.
 ///
 /// Split out from `forward_chat` so the scope limit can be asserted
 /// without a network call. Fono suppresses hidden reasoning on its *own*
@@ -44,22 +49,72 @@ fn client() -> &'static reqwest::Client {
 /// the action path — but a client pointing at Fono's LLM server is not
 /// Fono's assistant, and forcing that preference on it would silently
 /// degrade a caller that wanted the model to think.
-fn default_model(json: &mut serde_json::Value, fallback: &str) -> String {
-    let client_model =
-        json.get("model").and_then(serde_json::Value::as_str).filter(|s| !s.is_empty());
-    let Some(m) = client_model else {
-        if let Some(obj) = json.as_object_mut() {
-            obj.insert("model".to_string(), serde_json::Value::String(fallback.to_owned()));
+fn default_model(
+    json: &mut serde_json::Value,
+    fallback: &str,
+    offered: impl Fn(&str) -> bool,
+) -> String {
+    let client_model = json
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty() && offered(s))
+        .map(ToOwned::to_owned);
+    if let Some(m) = client_model {
+        return m;
+    }
+    if let Some(obj) = json.as_object_mut() {
+        obj.insert("model".to_string(), serde_json::Value::String(fallback.to_owned()));
+    }
+    fallback.to_owned()
+}
+
+/// How long the upstream's model list is reused before it is fetched again.
+const MODEL_LIST_TTL: Duration = Duration::from_secs(600);
+
+/// The model ids `upstream` lists at its `/models` endpoint, cached for
+/// [`MODEL_LIST_TTL`]. `None` when the list can't be had, in which case
+/// every model the client names is passed through.
+async fn offered_models(upstream: &CloudUpstream) -> Option<Arc<HashSet<String>>> {
+    type Cache = Mutex<Option<(String, Instant, Arc<HashSet<String>>)>>;
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+    let url = upstream.models_url.as_ref()?;
+    let cache = CACHE.get_or_init(Mutex::default);
+    if let Some((u, at, ids)) = cache.lock().ok()?.as_ref() {
+        if u == url && at.elapsed() < MODEL_LIST_TTL {
+            return Some(Arc::clone(ids));
         }
-        return fallback.to_owned();
-    };
-    m.to_owned()
+    }
+    let mut req = client().get(url).timeout(Duration::from_secs(5));
+    if !upstream.api_key.is_empty() {
+        req = req.bearer_auth(&upstream.api_key);
+    }
+    let resp = req.send().await.ok()?.error_for_status().ok()?;
+    let list: serde_json::Value = resp.json().await.ok()?;
+    let ids: HashSet<String> = list
+        .get("data")?
+        .as_array()?
+        .iter()
+        .filter_map(|m| m.get("id")?.as_str())
+        .map(|id| id.strip_prefix("models/").unwrap_or(id).to_owned())
+        .collect();
+    let ids = Arc::new(ids);
+    *cache.lock().ok()? = Some((url.clone(), Instant::now(), Arc::clone(&ids)));
+    Some(ids)
+}
+
+/// `true` when a client's `model` should reach the upstream: it isn't the
+/// name Fono advertises for itself, and the upstream lists it (or its list
+/// is unavailable).
+fn model_is_offered(model: &str, served_name: &str, offered: Option<&HashSet<String>>) -> bool {
+    model != served_name
+        && offered.is_none_or(|ids| ids.contains(model.strip_prefix("models/").unwrap_or(model)))
 }
 
 /// Forward a `/v1/chat/completions` request body to the cloud upstream
 /// and relay the response (SSE stream or single JSON) back verbatim.
 pub async fn forward_chat(
     upstream: &CloudUpstream,
+    served_name: &str,
     body: Bytes,
     log: &mut ReqLog,
 ) -> Response<ResBody> {
@@ -70,7 +125,11 @@ pub async fn forward_chat(
         }
     };
     let stream = json.get("stream").and_then(serde_json::Value::as_bool).unwrap_or(false);
-    log.set_model(default_model(&mut json, &upstream.model));
+    let offered = offered_models(upstream).await;
+    let effective = default_model(&mut json, &upstream.model, |m| {
+        model_is_offered(m, served_name, offered.as_deref())
+    });
+    log.set_model(effective);
 
     let mut req = client().post(&upstream.chat_url).json(&json);
     if !upstream.api_key.is_empty() {
@@ -179,7 +238,8 @@ async fn relay(resp: reqwest::Response, stream: bool, log: &mut ReqLog) -> Respo
 
 #[cfg(test)]
 mod tests {
-    use super::default_model;
+    use super::{default_model, model_is_offered};
+    use std::collections::HashSet;
 
     /// A client's request body reaches the upstream provider carrying
     /// exactly what the client wrote, plus a model when it omitted one.
@@ -198,7 +258,7 @@ mod tests {
             "reasoning_effort": "high",
             "messages": [],
         });
-        let effective = default_model(&mut json, "fono-default");
+        let effective = default_model(&mut json, "fono-default", |_| true);
 
         assert_eq!(effective, "some-reasoning-model", "an explicit model is honoured");
         assert_eq!(json["reasoning_effort"], "high", "Fono must not lower the client's effort");
@@ -212,10 +272,28 @@ mod tests {
     fn a_missing_model_is_filled_in_and_nothing_else_is() {
         for absent in [serde_json::json!({"messages": []}), serde_json::json!({"model": ""})] {
             let mut json = absent;
-            let effective = default_model(&mut json, "fono-default");
+            let effective = default_model(&mut json, "fono-default", |_| true);
             assert_eq!(effective, "fono-default");
             assert_eq!(json["model"], "fono-default");
             assert!(json.get("reasoning_effort").is_none());
         }
+    }
+
+    /// `fono`, the name Fono advertises, and models the upstream doesn't
+    /// list are replaced by the configured model.
+    #[test]
+    fn unknown_models_and_the_advertised_name_use_the_configured_model() {
+        let ids: HashSet<String> = ["gemini-2.5-flash".to_string()].into();
+        let offered = |m: &str| model_is_offered(m, "fono", Some(&ids));
+        for model in ["fono", "gpt-4o"] {
+            let mut json = serde_json::json!({ "model": model });
+            assert_eq!(default_model(&mut json, "gemini-2.5-pro", offered), "gemini-2.5-pro");
+            assert_eq!(json["model"], "gemini-2.5-pro");
+        }
+        let mut json = serde_json::json!({ "model": "models/gemini-2.5-flash" });
+        assert_eq!(default_model(&mut json, "x", offered), "models/gemini-2.5-flash");
+        // Without a model list every name except Fono's own goes through.
+        assert!(model_is_offered("anything", "fono", None));
+        assert!(!model_is_offered("fono", "fono", None));
     }
 }

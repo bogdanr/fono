@@ -1452,7 +1452,7 @@ impl SessionOrchestrator {
         self.polish.read().expect("polish lock poisoned").clone()
     }
 
-    fn current_config(&self) -> Arc<Config> {
+    pub(crate) fn current_config(&self) -> Arc<Config> {
         Arc::clone(&self.config.read().expect("config lock poisoned"))
     }
 

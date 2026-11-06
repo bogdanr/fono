@@ -21,7 +21,7 @@ use hyper::{Request, Response, StatusCode};
 
 use super::access_log::ReqLog;
 use super::messages::read_body_bytes;
-use super::{audio_response, openai_error, ResBody, ServerCtx};
+use super::{openai_error, ResBody, ServerCtx};
 
 /// Parsed `/v1/audio/transcriptions` request handed to the daemon closure.
 pub struct TranscribeRequest {
@@ -56,7 +56,7 @@ pub async fn speech(
         Err(e) => return openai_error(StatusCode::BAD_REQUEST, &format!("invalid JSON body: {e}")),
     };
     match speak(body).await {
-        Ok((content_type, audio)) => audio_response(content_type, audio),
+        Ok(audio) => crate::web_settings::speech_response(audio),
         Err(e) => openai_error(StatusCode::BAD_REQUEST, &e),
     }
 }

@@ -715,6 +715,52 @@ fn detect_cpu_features() -> CpuFeatures {
 
 // ----------------------------- tests -----------------------------
 
+/// CPU instructions this build's local speech and language models
+/// (whisper.cpp and llama.cpp) were compiled to use that this CPU lacks.
+/// Empty when the local models can run.
+///
+/// The build fixes the instruction set through the `GGML_*` variables in
+/// `.cargo/config.toml`. On a CPU without them the first call into the
+/// models dies with an illegal-instruction crash, so callers check this
+/// first and turn the local models off instead.
+#[must_use]
+pub fn local_models_missing_cpu_features() -> Vec<&'static str> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let built = |flag: Option<&str>| flag.is_some_and(|v| v.eq_ignore_ascii_case("on"));
+        let required = [
+            ("AVX", built(option_env!("GGML_AVX")), std::arch::is_x86_feature_detected!("avx")),
+            ("AVX2", built(option_env!("GGML_AVX2")), std::arch::is_x86_feature_detected!("avx2")),
+            ("FMA", built(option_env!("GGML_FMA")), std::arch::is_x86_feature_detected!("fma")),
+            ("F16C", built(option_env!("GGML_F16C")), std::arch::is_x86_feature_detected!("f16c")),
+            ("BMI2", built(option_env!("GGML_BMI2")), std::arch::is_x86_feature_detected!("bmi2")),
+        ];
+        required
+            .iter()
+            .filter(|(_, needed, has)| *needed && !*has)
+            .map(|(name, ..)| *name)
+            .collect()
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        Vec::new()
+    }
+}
+
+/// An error explaining why the local models cannot run on this CPU, or
+/// `None` when they can.
+#[must_use]
+pub fn local_models_unsupported() -> Option<String> {
+    let missing = local_models_missing_cpu_features();
+    (!missing.is_empty()).then(|| {
+        format!(
+            "this CPU lacks {}, which Fono's local speech-to-text and language models need; \
+             use a cloud provider for these instead",
+            missing.join(", ")
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

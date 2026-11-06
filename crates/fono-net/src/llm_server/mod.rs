@@ -506,16 +506,6 @@ pub(crate) fn openai_error(status: StatusCode, msg: &str) -> Response<ResBody> {
         .expect("static response builder")
 }
 
-/// Binary audio response (WAV or raw PCM) for `/v1/audio/speech`.
-pub(crate) fn audio_response(content_type: String, bytes: Vec<u8>) -> Response<ResBody> {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(hyper::header::CONTENT_TYPE, content_type)
-        .header(hyper::header::CACHE_CONTROL, "no-store")
-        .body(full(Bytes::from(bytes)))
-        .expect("static response builder")
-}
-
 pub(crate) fn text_response(status: StatusCode, body: &str) -> Response<ResBody> {
     Response::builder()
         .status(status)

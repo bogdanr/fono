@@ -169,6 +169,9 @@ impl WhisperLocal {
     fn ensure_ctx(&self) -> Result<()> {
         let mut guard = self.ctx.lock().map_err(|_| anyhow!("whisper mutex poisoned"))?;
         if guard.is_none() {
+            if let Some(why) = fono_core::hwcheck::local_models_unsupported() {
+                return Err(anyhow!("{why}"));
+            }
             let path = self.model_path.to_str().ok_or_else(|| anyhow!("non-UTF-8 model path"))?;
             let ctx = WhisperContext::new_with_params(path, WhisperContextParameters::default())
                 .context("load whisper model")?;
@@ -361,6 +364,9 @@ impl SpeechToText for WhisperLocal {
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut guard = ctx.lock().map_err(|_| anyhow!("whisper mutex poisoned"))?;
             if guard.is_none() {
+                if let Some(why) = fono_core::hwcheck::local_models_unsupported() {
+                    return Err(anyhow!("{why}"));
+                }
                 let p = path.to_str().ok_or_else(|| anyhow!("non-UTF-8 model path"))?;
                 let c = WhisperContext::new_with_params(p, WhisperContextParameters::default())
                     .context("load whisper model")?;

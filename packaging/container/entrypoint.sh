@@ -16,6 +16,23 @@ toml_string() {
     printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
+# Render a comma-separated list as a TOML string array: "a, b" -> ["a", "b"].
+toml_list() {
+    out="["
+    first=true
+    old_ifs=$IFS
+    IFS=,
+    for item in $1; do
+        item=$(printf '%s' "$item" | tr -d '[:space:]')
+        if [ -n "$item" ]; then
+            if [ "$first" = true ]; then first=false; else out="$out, "; fi
+            out="$out\"$(toml_string "$item")\""
+        fi
+    done
+    IFS=$old_ifs
+    printf '%s]' "$out"
+}
+
 if [ "${FONO_CONTAINER_WRITE_CONFIG:-missing}" = "always" ] || [ ! -f "$FONO_CONFIG" ]; then
     : "${FONO_LANGUAGES:=en}"
     : "${FONO_STT_BACKEND:=local}"
@@ -30,7 +47,24 @@ if [ "${FONO_CONTAINER_WRITE_CONFIG:-missing}" = "always" ] || [ ! -f "$FONO_CON
     : "${FONO_MDNS_NAME:=Fono}"
     : "${FONO_UPDATE_AUTO_CHECK:=false}"
     : "${FONO_POLISH_ENABLED:=false}"
-    : "${FONO_ASSISTANT_ENABLED:=false}"
+    # Assistant backend: none, or a cloud provider (groq, openai, anthropic,
+    # gemini, openrouter, ...) that reads its key from the environment.
+    : "${FONO_ASSISTANT_BACKEND:=none}"
+    if [ "$FONO_ASSISTANT_BACKEND" = "none" ]; then
+        : "${FONO_ASSISTANT_ENABLED:=false}"
+    else
+        : "${FONO_ASSISTANT_ENABLED:=true}"
+    fi
+    # Wyoming services to offer: any of asr, tts, wake, handle. `handle`
+    # (conversation agent) is only offered when the assistant is enabled.
+    : "${FONO_SERVICES:=asr,tts,wake,handle}"
+    # Ollama/OpenAI-compatible LLM server on 11434 and the web settings UI
+    # on 10808. Both require an API key from remote callers.
+    : "${FONO_LLM_ENABLED:=false}"
+    : "${FONO_WEB_ENABLED:=false}"
+    # A reverse proxy whose users have already signed in, such as Home
+    # Assistant's ingress proxy. It reaches the web UI without an API key.
+    : "${FONO_WEB_TRUSTED_PROXY:=}"
 
     stt_backend=$(toml_string "$FONO_STT_BACKEND")
     stt_model=$(toml_string "$FONO_STT_MODEL")
@@ -40,27 +74,11 @@ if [ "${FONO_CONTAINER_WRITE_CONFIG:-missing}" = "always" ] || [ ! -f "$FONO_CON
     tts_local_voice=$(toml_string "$FONO_TTS_LOCAL_VOICE")
     wyoming_bind=$(toml_string "$FONO_WYOMING_BIND")
     mdns_name=$(toml_string "$FONO_MDNS_NAME")
+    assistant_backend=$(toml_string "$FONO_ASSISTANT_BACKEND")
+    web_trusted_proxy=$(toml_string "$FONO_WEB_TRUSTED_PROXY")
 
-    languages_toml="["
-    first_language=true
-    old_ifs=$IFS
-    IFS=,
-    for language in $FONO_LANGUAGES; do
-        IFS=$old_ifs
-        language=$(printf '%s' "$language" | tr -d '[:space:]')
-        if [ -n "$language" ]; then
-            escaped_language=$(toml_string "$language")
-            if [ "$first_language" = true ]; then
-                first_language=false
-            else
-                languages_toml="$languages_toml, "
-            fi
-            languages_toml="$languages_toml\"$escaped_language\""
-        fi
-        IFS=,
-    done
-    IFS=$old_ifs
-    languages_toml="$languages_toml]"
+    languages_toml=$(toml_list "$FONO_LANGUAGES")
+    services_toml=$(toml_list "$FONO_SERVICES")
 
     tmp_config="$FONO_CONFIG.tmp.$$"
     cat > "$tmp_config" <<EOF_CONFIG
@@ -97,12 +115,22 @@ backend = "none"
 
 [assistant]
 enabled = $FONO_ASSISTANT_ENABLED
-backend = "none"
+backend = "$assistant_backend"
 
 [server.wyoming]
 enabled = true
 bind = "$wyoming_bind"
 port = $FONO_WYOMING_PORT
+services = $services_toml
+
+[server.llm]
+enabled = $FONO_LLM_ENABLED
+bind = "0.0.0.0"
+
+[server.web]
+enabled = $FONO_WEB_ENABLED
+bind = "0.0.0.0"
+trusted_proxy = "$web_trusted_proxy"
 
 [network]
 instance_name = "$mdns_name"

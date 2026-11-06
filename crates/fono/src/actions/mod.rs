@@ -143,6 +143,15 @@ impl Learning {
             debug!("actions: cannot judge what the last turn did: {e}");
         }
         let [one] = did.as_slice() else { return };
+        // A command that missed the device the user named is not one to
+        // replay: "turn on the basement lights" must not stand for a command
+        // that lit some other lamp in the basement. Written down as a failed
+        // run, so a phrase that was already a shortcut is slow again too.
+        let known = store.device_names_of(&one.source).unwrap_or_default();
+        let missed = named_but_missed(said, &known, &one.devices);
+        if let Some(name) = &missed {
+            info!("actions: {said:?} did not reach {name:?}; not learning it");
+        }
         let said = fono_core::tool_catalog::Said {
             phrase: said,
             lang,
@@ -150,7 +159,7 @@ impl Learning {
             tool: &one.tool,
             args: &one.args,
             devices: &one.devices,
-            ok: one.ok,
+            ok: one.ok && missed.is_none(),
             ms: one.ms,
         };
         match store.remember(&said) {
@@ -159,6 +168,36 @@ impl Learning {
             Err(e) => debug!("actions: cannot write down {:?}: {e}", said.phrase),
         }
     }
+}
+
+/// The device named word for word in `said` that the command did not
+/// reach, if any. Where one known name contains another ("Kitchen lights"
+/// and "Kitchen"), only the longest one that was said counts, because that
+/// is the device the user meant.
+fn named_but_missed(said: &str, known: &[String], reached: &[String]) -> Option<String> {
+    let said = format!(" {} ", words(said));
+    let mut named: Vec<&String> = known
+        .iter()
+        .filter(|n| !words(n).is_empty() && said.contains(&format!(" {} ", words(n))))
+        .collect();
+    named.sort_by_key(|n| std::cmp::Reverse(n.len()));
+    let mut meant: Vec<&String> = Vec::new();
+    for n in named {
+        if !meant.iter().any(|m| format!(" {} ", words(m)).contains(&format!(" {} ", words(n)))) {
+            meant.push(n);
+        }
+    }
+    meant.into_iter().find(|n| !reached.iter().any(|r| r.eq_ignore_ascii_case(n))).cloned()
+}
+
+/// `text` lower-cased, with anything but letters and digits turned into
+/// single spaces, so names compare word for word.
+fn words(text: &str) -> String {
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Run what this phrase has always run, without asking the model.
@@ -380,7 +419,7 @@ pub fn build(
             s.name.clone(),
             McpEndpoint {
                 url: s.sse_url(),
-                token: secrets.keys.get(&s.token_ref()).cloned(),
+                token: secrets.resolve(&s.token_ref()),
                 timeout: CALL_TIMEOUT,
             },
         );
@@ -2526,6 +2565,31 @@ fn brief(text: &str) -> String {
 mod tests {
     use super::*;
 
+    /// The house this was found on: "Basement lights" is a switch, and a
+    /// command for the lights in the basement lit only the one real light.
+    #[test]
+    fn a_command_that_missed_the_named_device_is_not_learned() {
+        let known: Vec<String> = ["Basement lights", "Basement lights (2)", "Downstairs light"]
+            .map(String::from)
+            .to_vec();
+        let reached = vec!["Downstairs light".to_string()];
+        assert_eq!(
+            named_but_missed("Turn on the basement lights", &known, &reached).as_deref(),
+            Some("Basement lights")
+        );
+        let reached = vec!["Basement lights".to_string()];
+        assert_eq!(named_but_missed("Turn on the basement lights.", &known, &reached), None);
+        // Naming no device leaves the decision to the usual rules.
+        assert_eq!(named_but_missed("Turn on the lights downstairs", &known, &[]), None);
+    }
+
+    #[test]
+    fn only_the_longest_name_said_counts() {
+        let known: Vec<String> = ["Kitchen", "Kitchen lights"].map(String::from).to_vec();
+        let reached = vec!["Kitchen lights".to_string()];
+        assert_eq!(named_but_missed("turn off the kitchen lights", &known, &reached), None);
+    }
+
     fn tools(verify: VerifyClass) -> std::collections::HashMap<String, Runnable> {
         let mut m = std::collections::HashMap::new();
         m.insert(
@@ -4166,7 +4230,7 @@ mod tests {
         for s in &cfg.assistant.tools.mcp {
             let ep = fono_assistant::mcp_client::McpEndpoint {
                 url: s.sse_url(),
-                token: secrets.keys.get(&s.token_ref()).cloned(),
+                token: secrets.resolve(&s.token_ref()),
                 timeout: CALL_TIMEOUT,
             };
             let found = fono_assistant::mcp_client::discover(&ep).await.expect("discover");

@@ -235,6 +235,9 @@ whatlang = "0.16"
 # `ServiceDaemon::new`, `browse`, `register`, `unregister`. Used only
 # inside `fono-net` behind the `discovery` feature.
 mdns-sd = "0.13"
+# Interface list used to keep mDNS adverts off container bridges. Already
+# linked through mdns-sd, so naming it here adds nothing to the binary.
+if-addrs = "0.13"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

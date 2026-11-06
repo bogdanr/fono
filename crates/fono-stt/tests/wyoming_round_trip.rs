@@ -107,6 +107,7 @@ async fn spawn_server(
                             let t = Transcript {
                                 text: canned.to_string(),
                                 language: Some("en".into()),
+                                context: None,
                             };
                             Frame::new(TRANSCRIPT)
                                 .with_data(to_value(&t).unwrap())

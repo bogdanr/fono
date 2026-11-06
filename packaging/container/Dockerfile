@@ -44,7 +44,7 @@ ENV FONO_LOG=info
 
 WORKDIR /data
 VOLUME ["/data"]
-EXPOSE 10300/tcp
+EXPOSE 10300/tcp 11434/tcp 10808/tcp
 
 ENTRYPOINT ["/usr/local/bin/fono-entrypoint"]
 CMD ["fono"]

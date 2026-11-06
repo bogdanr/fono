@@ -290,6 +290,9 @@ pub fn backend() -> &'static LlamaBackend {
 /// Propagates `llama.cpp`'s load failure (missing/corrupt GGUF, OOM, …).
 pub fn shared_model(path: &Path, params: &LlamaModelParams) -> Result<Arc<LlamaModel>> {
     static MODELS: OnceLock<Mutex<HashMap<ModelKey, Weak<LlamaModel>>>> = OnceLock::new();
+    if let Some(why) = crate::hwcheck::local_models_unsupported() {
+        anyhow::bail!("{why}");
+    }
     let key = ModelKey::new(path, params);
     let registry = MODELS.get_or_init(|| Mutex::new(HashMap::new()));
     // Held across the (slow) load on purpose: a concurrent request for the

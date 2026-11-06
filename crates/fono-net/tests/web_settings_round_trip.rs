@@ -258,8 +258,13 @@ fn history_stubs() -> (
 }
 
 async fn start(auth_enabled: bool) -> fono_net::web_settings::WebSettingsHandle {
-    let cfg =
-        WebSettingsConfig { bind: "127.0.0.1".into(), port: 0, auth_enabled, loopback_only: true };
+    let cfg = WebSettingsConfig {
+        bind: "127.0.0.1".into(),
+        port: 0,
+        auth_enabled,
+        loopback_only: true,
+        trusted_proxy: None,
+    };
     // A verifier that rejects everything: proves loopback is trusted even
     // when no token could ever pass.
     let verifier: fono_net::AuthVerifier = Arc::new(|_tok: &str| None);

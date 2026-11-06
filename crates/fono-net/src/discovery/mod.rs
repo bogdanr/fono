@@ -205,3 +205,48 @@ impl Registry {
         before - g.len()
     }
 }
+
+/// Stop `daemon` announcing on interfaces other devices on the LAN cannot
+/// reach: container and VM bridges (`docker0` at 172.17.0.1 and the like)
+/// and IPv6 link-local addresses. A client that resolves a service to a
+/// single address, such as Android's NSD, could otherwise pick one of
+/// these and fail to connect.
+pub fn skip_unreachable_interfaces(daemon: &mdns_sd::ServiceDaemon) {
+    let Ok(interfaces) = if_addrs::get_if_addrs() else { return };
+    for intf in interfaces {
+        let ip = intf.ip();
+        if unreachable_from_lan(&intf.name, ip) {
+            if let Err(e) = daemon.disable_interface(mdns_sd::IfKind::Addr(ip)) {
+                tracing::debug!("mdns: cannot skip {} ({ip}): {e}", intf.name);
+            }
+        }
+    }
+}
+
+/// Interface name prefixes of container, VM and VPN bridges.
+const VIRTUAL_PREFIXES: &[&str] =
+    &["docker", "veth", "br-", "virbr", "vboxnet", "vmnet", "cni", "flannel", "podman", "lxc"];
+
+/// `true` for an address other LAN devices cannot use to reach this host.
+#[must_use]
+pub fn unreachable_from_lan(name: &str, ip: IpAddr) -> bool {
+    let link_local_v6 = matches!(ip, IpAddr::V6(v6) if (v6.segments()[0] & 0xffc0) == 0xfe80);
+    link_local_v6 || VIRTUAL_PREFIXES.iter().any(|p| name.starts_with(p))
+}
+
+#[cfg(test)]
+mod lan_tests {
+    use super::*;
+
+    #[test]
+    fn container_bridges_and_link_local_are_skipped() {
+        let v4 = |s: &str| -> IpAddr { s.parse().unwrap() };
+        assert!(unreachable_from_lan("docker0", v4("172.17.0.1")));
+        assert!(unreachable_from_lan("veth1a2b", v4("172.17.0.2")));
+        assert!(unreachable_from_lan("br-5f3c", v4("172.18.0.1")));
+        assert!(unreachable_from_lan("eth0", v4("fe80::1")));
+        assert!(!unreachable_from_lan("eth0", v4("192.168.0.20")));
+        assert!(!unreachable_from_lan("wlan0", v4("fd00::20")));
+        assert!(!unreachable_from_lan("enp3s0", v4("2a02:2f0e::1")));
+    }
+}

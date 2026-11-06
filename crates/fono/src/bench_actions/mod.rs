@@ -354,7 +354,7 @@ fn endpoint_for(config: &Config, secrets: &Secrets, name: &str) -> Option<McpEnd
     let s = config.assistant.tools.mcp.iter().find(|s| squash(&s.name) == want)?;
     Some(McpEndpoint {
         url: s.sse_url(),
-        token: secrets.keys.get(&s.token_ref()).cloned(),
+        token: secrets.resolve(&s.token_ref()),
         timeout: CALL_TIMEOUT,
     })
 }

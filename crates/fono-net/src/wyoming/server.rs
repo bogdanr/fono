@@ -16,6 +16,10 @@
 //!             transcribe     -> transcript
 //! ```
 //!
+//! A conversation service rides the same listener: a `transcript`
+//! *sent by the client* (Home Assistant's Wyoming conversation agent)
+//! is answered with `handled` or `not-handled`.
+//!
 //! `transcript-start` / `transcript-chunk` / `transcript-stop` (the
 //! streaming server response variant) is *not* emitted —
 //! `SpeechToText::transcribe` is one-shot, so there's no preview text
@@ -32,13 +36,16 @@ use anyhow::{anyhow, Context, Result};
 use fono_audio::wakeword::WakeWord;
 use fono_net_codec::wyoming::{
     take_auth_token, AsrModel, AsrProgram, Attribution, AudioChunk, AudioStart, AudioStop, Detect,
-    Detection, Info, Synthesize, Transcribe, Transcript, TtsProgram, TtsVoice, WakeModel,
-    WakeProgram, AUDIO_CHUNK, AUDIO_START, AUDIO_STOP, DESCRIBE, DETECT, DETECTION, ERROR, INFO,
-    SYNTHESIZE, TRANSCRIBE, TRANSCRIPT,
+    Detection, HandleModel, HandleProgram, Handled, Info, NotHandled, Synthesize, SynthesizeChunk,
+    SynthesizeStart, Transcribe, Transcript, TtsProgram, TtsVoice, WakeModel, WakeProgram,
+    AUDIO_CHUNK, AUDIO_START, AUDIO_STOP, DESCRIBE, DETECT, DETECTION, ERROR, HANDLED, INFO,
+    NOT_HANDLED, SYNTHESIZE, SYNTHESIZE_CHUNK, SYNTHESIZE_START, SYNTHESIZE_STOP,
+    SYNTHESIZE_STOPPED, TRANSCRIBE, TRANSCRIPT,
 };
 use fono_net_codec::Frame;
 use fono_stt::traits::SpeechToText;
 use fono_tts::traits::TextToSpeech;
+use futures::StreamExt;
 use serde_json::to_value;
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -100,6 +107,43 @@ pub struct WyomingServerConfig {
     /// in lockstep that way (the server *is* the detector — audio never
     /// leaves the machine).
     pub wake_models: Vec<AdvertisedWakeModel>,
+    /// Advertise and serve speech-to-text. `true` by default; turned off
+    /// when the user wants this listener for text-to-speech or wake word
+    /// only, so Home Assistant creates no speech-to-text entity for it.
+    pub serve_asr: bool,
+    /// The conversation service advertised in `info.handle`. `None` (the
+    /// default) advertises none. The daemon sets it together with
+    /// [`WyomingServer::with_handle`], so advertisement and serving stay in
+    /// lockstep.
+    pub handle: Option<AdvertisedHandle>,
+}
+
+/// The conversation service surfaced via `info.handle`.
+#[derive(Debug, Clone, Default)]
+pub struct AdvertisedHandle {
+    /// Languages the agent answers in. Empty means any language.
+    pub languages: Vec<String>,
+    /// Shown to Home Assistant as the model name, e.g. `gpt-5-mini`.
+    pub model: String,
+    /// The agent can switch things in the home while answering.
+    pub home_control: bool,
+}
+
+/// One request to the conversation service: what the user said.
+#[derive(Debug, Clone)]
+pub struct HandleRequest {
+    pub text: String,
+    pub language: Option<String>,
+    /// Home Assistant's conversation id, so follow-ups share history.
+    pub conversation_id: Option<String>,
+}
+
+/// The conversation service's answer.
+#[derive(Debug, Clone, Default)]
+pub struct HandleReply {
+    pub text: String,
+    /// Ask the caller to listen again for a follow-up.
+    pub continue_conversation: bool,
 }
 
 /// One wake-word model surfaced via `info.wake[].models`. Derived by the
@@ -148,6 +192,8 @@ impl Default for WyomingServerConfig {
             loopback_only: true,
             tts_voices: Vec::new(),
             wake_models: Vec::new(),
+            serve_asr: true,
+            handle: None,
         }
     }
 }
@@ -214,6 +260,20 @@ pub type TtsProvider = Arc<dyn Fn() -> Arc<dyn TextToSpeech> + Send + Sync>;
 /// which would stream idle mic audio over the LAN).
 pub type WakeProvider = Arc<dyn Fn() -> Box<dyn WakeWord> + Send + Sync>;
 
+/// Answers conversation requests. Invoked once per `transcript` a client
+/// sends; the daemon runs the request through the active assistant.
+pub type HandleProvider = Arc<
+    dyn Fn(HandleRequest) -> futures::future::BoxFuture<'static, Result<HandleReply>> + Send + Sync,
+>;
+
+/// The optional services bound to one connection.
+#[derive(Default)]
+struct ConnServices {
+    tts: Option<Arc<dyn TextToSpeech>>,
+    wake: Option<Box<dyn WakeWord>>,
+    handle: Option<HandleProvider>,
+}
+
 /// The server itself. Stateless beyond the config; one instance per
 /// `[server.wyoming]` block.
 pub struct WyomingServer {
@@ -221,13 +281,14 @@ pub struct WyomingServer {
     stt: SttProvider,
     tts: Option<TtsProvider>,
     wake: Option<WakeProvider>,
+    handle: Option<HandleProvider>,
 }
 
 impl WyomingServer {
     /// Build a server. Does not bind yet — call [`Self::start`].
     #[must_use]
     pub fn new(cfg: WyomingServerConfig, stt: SttProvider) -> Self {
-        Self { cfg, stt, tts: None, wake: None }
+        Self { cfg, stt, tts: None, wake: None, handle: None }
     }
 
     /// Convenience constructor for callers that want to pin a single
@@ -269,6 +330,15 @@ impl WyomingServer {
         self
     }
 
+    /// Bind a conversation service so this listener answers a `transcript`
+    /// sent by the client with `handled`. Set
+    /// [`WyomingServerConfig::handle`] too, so `info` advertises it.
+    #[must_use]
+    pub fn with_handle(mut self, handle: HandleProvider) -> Self {
+        self.handle = Some(handle);
+        self
+    }
+
     /// Bind the listener and spawn the accept loop. Returns once the
     /// socket is listening so callers can `.local_addr()` immediately.
     pub async fn start(self) -> Result<WyomingServerHandle> {
@@ -289,6 +359,7 @@ impl WyomingServer {
         let stt = self.stt;
         let tts = self.tts;
         let wake = self.wake;
+        let handle = self.handle;
         let join = tokio::spawn(async move {
             // Bound mpsc just to give us a place to count active conns
             // and to provide a backpressure point if accept() outpaces
@@ -315,12 +386,15 @@ impl WyomingServer {
                                 }
                                 let cfg2 = Arc::clone(&cfg);
                                 let stt_snapshot = (stt)();
-                                let tts_snapshot = tts.as_ref().map(|f| f());
-                                let wake_snapshot = wake.as_ref().map(|f| f());
+                                let services = ConnServices {
+                                    tts: tts.as_ref().map(|f| f()),
+                                    wake: wake.as_ref().map(|f| f()),
+                                    handle: handle.clone(),
+                                };
                                 let slot_tx2 = slot_tx.clone();
                                 tokio::spawn(async move {
                                     let _slot = slot_tx2.try_send(()).ok();
-                                    if let Err(e) = handle_connection(sock, peer, cfg2, stt_snapshot, tts_snapshot, wake_snapshot).await {
+                                    if let Err(e) = handle_connection(sock, peer, cfg2, stt_snapshot, services).await {
                                         tracing::debug!(
                                             target: "fono::wyoming::server",
                                             %peer,
@@ -424,9 +498,9 @@ async fn handle_connection(
     peer: SocketAddr,
     cfg: Arc<WyomingServerConfig>,
     stt: Arc<dyn SpeechToText>,
-    tts: Option<Arc<dyn TextToSpeech>>,
-    mut wake: Option<Box<dyn WakeWord>>,
+    services: ConnServices,
 ) -> Result<()> {
+    let ConnServices { tts, mut wake, handle } = services;
     sock.set_nodelay(true).ok();
     let (read_half, mut write_half) = sock.into_split();
     let mut reader = BufReader::new(read_half);
@@ -463,14 +537,8 @@ async fn handle_connection(
             AUDIO_CHUNK => {
                 let hdr: AudioChunk =
                     serde_json::from_value(frame.data).context("decoding audio-chunk header")?;
-                if !audio_started {
-                    tracing::trace!(
-                        target: "fono::wyoming::server",
-                        %peer,
-                        "accepting audio-chunk before audio-start"
-                    );
-                    audio_started = true;
-                }
+                // A chunk before `audio-start` is accepted as its start.
+                audio_started = true;
                 sample_rate = hdr.rate;
                 let samples = decode_pcm_le(&frame.payload, hdr.width, hdr.channels)?;
                 // Wake path (opt-in): feed the freshly-decoded samples to the
@@ -496,7 +564,9 @@ async fn handle_connection(
                     .await?;
                 }
             }
-            TRANSCRIBE => {
+            // With speech-to-text switched off, `transcribe` falls through to
+            // the catch-all below and is ignored.
+            TRANSCRIBE if cfg.serve_asr => {
                 let req: Transcribe =
                     serde_json::from_value(frame.data).context("decoding transcribe")?;
                 if pcm_f32.is_empty() || audio_started {
@@ -521,8 +591,12 @@ async fn handle_connection(
                     .await?;
                 }
             }
-            SYNTHESIZE => {
-                dispatch_synthesize(peer, tts.as_ref(), &mut write_half, frame.data).await?;
+            TRANSCRIPT => {
+                dispatch_handle(peer, handle.as_ref(), &mut write_half, frame.data).await?;
+            }
+            SYNTHESIZE | SYNTHESIZE_START => {
+                let (r, w) = (&mut reader, &mut write_half);
+                dispatch_synthesize(peer, tts.as_ref(), r, w, frame).await?;
             }
             DETECT => {
                 let req: Detect = serde_json::from_value(frame.data).context("decoding detect")?;
@@ -647,9 +721,59 @@ where
         chars = res.text.chars().count(),
         "transcription request complete"
     );
-    let resp = Transcript { text: res.text, language: res.language };
+    let resp = Transcript { text: res.text, language: res.language, context: None };
     Frame::new(TRANSCRIPT).with_data(to_value(&resp)?).write_async(write_half).await?;
     pcm_f32.clear();
+    Ok(())
+}
+
+/// Answer a `transcript` sent by the client through the conversation
+/// service. A failure is reported as `not-handled` so the caller speaks
+/// the reason instead of hanging; with no service bound the event is
+/// ignored, like any other unsupported one.
+async fn dispatch_handle<W>(
+    peer: SocketAddr,
+    handle: Option<&HandleProvider>,
+    write_half: &mut W,
+    frame_data: serde_json::Value,
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let Some(handle) = handle else {
+        tracing::trace!(target: "fono::wyoming::server", %peer, "transcript with no conversation service; ignoring");
+        return Ok(());
+    };
+    let req: Transcript = serde_json::from_value(frame_data).context("decoding transcript")?;
+    let conversation_id = req
+        .context
+        .as_ref()
+        .and_then(|c| c.get("conversation_id"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    tracing::info!(target: "fono::wyoming::server", %peer, chars = req.text.chars().count(), "conversation request");
+    let started = std::time::Instant::now();
+    let outcome =
+        handle(HandleRequest { text: req.text, language: req.language, conversation_id }).await;
+    tracing::info!(
+        target: "fono::wyoming::server",
+        %peer,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        ok = outcome.is_ok(),
+        "conversation request complete"
+    );
+    let frame = match outcome {
+        Ok(reply) => Frame::new(HANDLED).with_data(to_value(Handled {
+            text: Some(reply.text),
+            context: req.context,
+            continue_conversation: reply.continue_conversation.then_some(true),
+        })?),
+        Err(e) => Frame::new(NOT_HANDLED).with_data(to_value(NotHandled {
+            text: Some(format!("{e:#}")),
+            context: req.context,
+        })?),
+    };
+    frame.write_async(write_half).await?;
     Ok(())
 }
 
@@ -663,18 +787,23 @@ const TTS_CHUNK_SAMPLES: usize = 2048;
 /// it via [`handle_synthesize`]. With no backend bound the request is
 /// logged and dropped — an ASR-only listener stays well-behaved rather
 /// than tearing down the connection.
-async fn dispatch_synthesize<W>(
+async fn dispatch_synthesize<R, W>(
     peer: SocketAddr,
     tts: Option<&Arc<dyn TextToSpeech>>,
+    reader: &mut R,
     write_half: &mut W,
-    frame_data: serde_json::Value,
+    frame: Frame,
 ) -> Result<()>
 where
+    R: tokio::io::AsyncBufRead + Unpin + Send,
     W: AsyncWrite + Unpin,
 {
-    let req: Synthesize = serde_json::from_value(frame_data).context("decoding synthesize")?;
+    if frame.kind == SYNTHESIZE_START {
+        return stream_synthesize(peer, tts, reader, write_half, frame.data).await;
+    }
+    let req: Synthesize = serde_json::from_value(frame.data).context("decoding synthesize")?;
     if let Some(tts) = tts {
-        handle_synthesize(peer, tts.as_ref(), write_half, req).await?;
+        handle_synthesize(peer, tts, write_half, req).await?;
     } else {
         tracing::warn!(
             target: "fono::wyoming::server",
@@ -685,15 +814,14 @@ where
     Ok(())
 }
 
-/// Drive a `synthesize` request: call the backend, then stream the
-/// result back as the canonical `audio-start` / `audio-chunk`* /
-/// `audio-stop` sequence in int16 LE mono (the Wyoming wire format).
-/// Empty `text` yields an empty PCM buffer (trait contract), which we
-/// honour as `audio-start` immediately followed by `audio-stop` with no
-/// chunks in between.
+/// Drive a `synthesize` request: speak the text piece by piece and send
+/// each piece's audio as soon as it is made, as the canonical
+/// `audio-start` / `audio-chunk`* / `audio-stop` sequence in int16 LE mono
+/// (the Wyoming wire format). Empty `text` yields `audio-start` followed
+/// directly by `audio-stop`.
 async fn handle_synthesize<W>(
     peer: SocketAddr,
-    tts: &dyn TextToSpeech,
+    tts: &Arc<dyn TextToSpeech>,
     write_half: &mut W,
     req: Synthesize,
 ) -> Result<()>
@@ -701,7 +829,7 @@ where
     W: AsyncWrite + Unpin,
 {
     let (voice, lang) =
-        req.voice.as_ref().map_or((None, None), |v| (v.name.as_deref(), v.language.as_deref()));
+        req.voice.as_ref().map_or((None, None), |v| (v.name.clone(), v.language.clone()));
     tracing::info!(
         target: "fono::wyoming::server",
         %peer,
@@ -711,41 +839,202 @@ where
         "processing synthesize request"
     );
     let started = std::time::Instant::now();
-    let audio = tts.synthesize(&req.text, voice, lang).await.context("backend tts.synthesize")?;
-    let rate = audio.sample_rate;
-
-    Frame::new(AUDIO_START)
-        .with_data(to_value(AudioStart { rate, width: 2, channels: 1, timestamp: None })?)
-        .write_async(write_half)
-        .await?;
-
-    for chunk in audio.pcm.chunks(TTS_CHUNK_SAMPLES) {
-        let mut bytes = Vec::with_capacity(chunk.len() * 2);
-        for &s in chunk {
-            let v = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
-            bytes.extend_from_slice(&v.to_le_bytes());
+    let mut audio = fono_tts::synthesize_in_pieces(Arc::clone(tts), &req.text, voice, lang);
+    let mut out = AudioOut::new(tts.native_sample_rate());
+    while let Some(chunk) = audio.next().await {
+        match chunk {
+            Ok(chunk) => out.write(write_half, &chunk, started).await?,
+            Err(e) => {
+                // Tell the peer rather than just closing, and say so in the
+                // log: a provider's rate limit or a bad key shows up here.
+                tracing::warn!(target: "fono::wyoming::server", %peer, "synthesis failed: {e:#}");
+                let err = serde_json::json!({ "text": format!("{e:#}"), "code": "tts-failed" });
+                Frame::new(ERROR).with_data(err).write_async(write_half).await?;
+                return Ok(());
+            }
         }
-        Frame::new(AUDIO_CHUNK)
-            .with_data(to_value(AudioChunk { rate, width: 2, channels: 1, timestamp: None })?)
-            .with_payload(bytes)
-            .write_async(write_half)
-            .await?;
     }
+    out.finish(write_half).await?;
+    out.log(peer, started, "synthesize request complete");
+    Ok(())
+}
 
-    Frame::new(AUDIO_STOP)
-        .with_data(to_value(AudioStop::default())?)
-        .write_async(write_half)
-        .await?;
-
+/// Drive a streamed reply: `synthesize-start`, then `synthesize-chunk`s of
+/// text as a model writes it, then `synthesize-stop`. Audio goes out piece
+/// by piece while text is still arriving, and `synthesize-stopped` ends it.
+///
+/// Home Assistant also sends the whole text as a plain `synthesize` between
+/// the last chunk and the stop, for servers that do not stream. Answering
+/// it would speak the reply twice, so it is ignored here.
+async fn stream_synthesize<R, W>(
+    peer: SocketAddr,
+    tts: Option<&Arc<dyn TextToSpeech>>,
+    reader: &mut R,
+    write_half: &mut W,
+    start: serde_json::Value,
+) -> Result<()>
+where
+    R: tokio::io::AsyncBufRead + Unpin + Send,
+    W: AsyncWrite + Unpin,
+{
+    let started = std::time::Instant::now();
+    let start: SynthesizeStart =
+        serde_json::from_value(start).context("decoding synthesize-start")?;
+    let (voice, lang) = start.voice.map_or((None, None), |v| (v.name, v.language));
     tracing::info!(
         target: "fono::wyoming::server",
         %peer,
-        elapsed_ms = started.elapsed().as_millis() as u64,
-        samples = audio.pcm.len(),
-        rate,
-        "synthesize request complete"
+        voice,
+        lang,
+        "processing streamed synthesize request"
     );
+    // Reading a frame is not safe to abandon halfway, so frames come from a
+    // stream that keeps a half-read frame across `select!` turns.
+    let mut frames =
+        Box::pin(futures::stream::unfold(
+            reader,
+            |r| async move { Some((read_frame(r).await, r)) },
+        ));
+    let (tx, rx) = mpsc::unbounded_channel::<String>();
+    let mut tx = Some(tx);
+    let mut out = tts.map(|t| AudioOut::new(t.native_sample_rate()));
+    let mut audio = tts.map(|t| fono_tts::synthesize_arriving_text(Arc::clone(t), rx, voice, lang));
+    let mut failed = None;
+    loop {
+        tokio::select! {
+            frame = frames.next(), if tx.is_some() => {
+                let frame = frame.expect("frame stream never ends")?;
+                match frame.kind.as_str() {
+                    SYNTHESIZE_CHUNK => {
+                        let chunk: SynthesizeChunk = serde_json::from_value(frame.data)
+                            .context("decoding synthesize-chunk")?;
+                        if let Some(tx) = &tx {
+                            let _ = tx.send(chunk.text);
+                        }
+                    }
+                    SYNTHESIZE_STOP => tx = None,
+                    // The same text again, for servers that do not stream.
+                    SYNTHESIZE => {}
+                    other => tracing::trace!(
+                        target: "fono::wyoming::server",
+                        event = other,
+                        "ignoring event inside a streamed synthesize"
+                    ),
+                }
+            }
+            chunk = async { audio.as_mut()?.next().await }, if audio.is_some() && failed.is_none() => {
+                match chunk {
+                    Some(Ok(chunk)) => {
+                        let out = out.as_mut().expect("set with audio");
+                        out.write(write_half, &chunk, started).await?;
+                    }
+                    Some(Err(e)) => failed = Some(e),
+                    None => audio = None,
+                }
+            }
+            else => break,
+        }
+    }
+    drop(frames);
+    if let Some(e) = &failed {
+        tracing::warn!(
+            target: "fono::wyoming::server",
+            %peer,
+            "streamed synthesis failed partway: {e:#}"
+        );
+    }
+    if let Some(mut out) = out {
+        out.finish(write_half).await?;
+        out.log(peer, started, "streamed synthesize request complete");
+    } else {
+        tracing::warn!(
+            target: "fono::wyoming::server",
+            %peer,
+            "streamed synthesize requested but no TTS backend is bound; ignoring"
+        );
+    }
+    Frame::new(SYNTHESIZE_STOPPED).write_async(write_half).await?;
     Ok(())
+}
+
+/// Sends synthesised audio as Wyoming frames: `audio-start` before the
+/// first chunk, `audio-chunk`s, and `audio-stop` at the end.
+struct AudioOut {
+    rate: u32,
+    started: bool,
+    samples: usize,
+    first_audio_ms: Option<u64>,
+}
+
+impl AudioOut {
+    fn new(rate: u32) -> Self {
+        Self { rate, started: false, samples: 0, first_audio_ms: None }
+    }
+
+    async fn start<W: AsyncWrite + Unpin>(&mut self, write_half: &mut W) -> Result<()> {
+        if !self.started {
+            self.started = true;
+            let rate = self.rate;
+            Frame::new(AUDIO_START)
+                .with_data(to_value(AudioStart { rate, width: 2, channels: 1, timestamp: None })?)
+                .write_async(write_half)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn write<W: AsyncWrite + Unpin>(
+        &mut self,
+        write_half: &mut W,
+        chunk: &fono_tts::TtsChunk,
+        since: std::time::Instant,
+    ) -> Result<()> {
+        if chunk.pcm.is_empty() {
+            return Ok(());
+        }
+        if !self.started {
+            self.rate = chunk.sample_rate;
+            self.start(write_half).await?;
+            self.first_audio_ms = Some(u64::try_from(since.elapsed().as_millis()).unwrap_or(0));
+        }
+        let rate = self.rate;
+        for part in chunk.pcm.chunks(TTS_CHUNK_SAMPLES) {
+            let mut bytes = Vec::with_capacity(part.len() * 2);
+            for &s in part {
+                #[allow(clippy::cast_possible_truncation)]
+                let v = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            Frame::new(AUDIO_CHUNK)
+                .with_data(to_value(AudioChunk { rate, width: 2, channels: 1, timestamp: None })?)
+                .with_payload(bytes)
+                .write_async(write_half)
+                .await?;
+        }
+        self.samples += chunk.pcm.len();
+        Ok(())
+    }
+
+    async fn finish<W: AsyncWrite + Unpin>(&mut self, write_half: &mut W) -> Result<()> {
+        self.start(write_half).await?;
+        Frame::new(AUDIO_STOP)
+            .with_data(to_value(AudioStop::default())?)
+            .write_async(write_half)
+            .await?;
+        Ok(())
+    }
+
+    fn log(&self, peer: SocketAddr, since: std::time::Instant, what: &str) {
+        tracing::info!(
+            target: "fono::wyoming::server",
+            %peer,
+            first_audio_ms = self.first_audio_ms,
+            elapsed_ms = u64::try_from(since.elapsed().as_millis()).unwrap_or(0),
+            samples = self.samples,
+            rate = self.rate,
+            "{what}"
+        );
+    }
 }
 
 /// Convert PCM bytes to mono `f32` samples in the -1.0..1.0 range.
@@ -806,17 +1095,21 @@ fn build_info(cfg: &WyomingServerConfig) -> Info {
             version: m.version.clone().or_else(|| Some(cfg.server_version.clone())),
         })
         .collect();
-    let asr = vec![AsrProgram {
-        name: cfg.server_name.clone(),
-        attribution: attribution.clone(),
-        installed: true,
-        description: Some("Fono speech-to-text".to_string()),
-        version: Some(cfg.server_version.clone()),
-        models,
-        // Streaming-response support arrives when StreamingStt is
-        // wired through. For now, advertise the one-shot lane only.
-        supports_transcript_streaming: false,
-    }];
+    let asr = if cfg.serve_asr {
+        vec![AsrProgram {
+            name: cfg.server_name.clone(),
+            attribution: attribution.clone(),
+            installed: true,
+            description: Some("Fono speech-to-text".to_string()),
+            version: Some(cfg.server_version.clone()),
+            models,
+            // Streaming-response support arrives when StreamingStt is
+            // wired through. For now, advertise the one-shot lane only.
+            supports_transcript_streaming: false,
+        }]
+    } else {
+        Vec::new()
+    };
     // Advertise a TTS program only when voices are configured — an
     // empty `tts` array means "ASR only" to Home Assistant's loader.
     let tts = if cfg.tts_voices.is_empty() {
@@ -841,9 +1134,9 @@ fn build_info(cfg: &WyomingServerConfig) -> Info {
                     version: v.version.clone().or_else(|| Some(cfg.server_version.clone())),
                 })
                 .collect(),
-            // Sentence-level streaming is plumbed when the local engine
-            // streams; the one-shot lane is correct for now.
-            supports_synthesize_streaming: false,
+            // Text arriving in `synthesize-chunk`s is spoken piece by
+            // piece while the reply is still being written.
+            supports_synthesize_streaming: true,
         }]
     };
     // Advertise a wake program only when wake models are configured — an
@@ -873,7 +1166,28 @@ fn build_info(cfg: &WyomingServerConfig) -> Info {
                 .collect(),
         }]
     };
-    Info { asr, tts, wake, ..Info::default() }
+    let handle = cfg
+        .handle
+        .iter()
+        .map(|h| HandleProgram {
+            name: cfg.server_name.clone(),
+            attribution: attribution.clone(),
+            installed: true,
+            description: Some("Fono assistant".to_string()),
+            version: Some(cfg.server_version.clone()),
+            models: vec![HandleModel {
+                name: h.model.clone(),
+                languages: h.languages.clone(),
+                installed: true,
+                attribution: attribution.clone(),
+                description: None,
+                version: Some(cfg.server_version.clone()),
+            }],
+            supports_handled_streaming: false,
+            supports_home_control: h.home_control,
+        })
+        .collect();
+    Info { asr, tts, wake, handle, ..Info::default() }
 }
 
 #[cfg(test)]
@@ -971,7 +1285,7 @@ mod tests {
     /// frames back, returning `(audio-start header, total samples across
     /// chunks, saw audio-stop)`.
     async fn collect_synth_frames(pcm: Vec<f32>, rate: u32) -> (AudioStart, usize, bool) {
-        let tts = MockTts { pcm, rate };
+        let tts: Arc<dyn TextToSpeech> = Arc::new(MockTts { pcm, rate });
         let req = Synthesize { text: "hello".into(), voice: None };
         let peer: SocketAddr = "127.0.0.1:9".parse().unwrap();
         let mut buf: Vec<u8> = Vec::new();
@@ -1016,10 +1330,40 @@ mod tests {
         assert!(saw_stop);
     }
 
+    struct FailingTts;
+
+    #[async_trait::async_trait]
+    impl TextToSpeech for FailingTts {
+        async fn synthesize(&self, _: &str, _: Option<&str>, _: Option<&str>) -> Result<TtsAudio> {
+            Err(anyhow!("429 Too Many Requests"))
+        }
+        fn name(&self) -> &'static str {
+            "failing"
+        }
+        fn native_sample_rate(&self) -> u32 {
+            16_000
+        }
+    }
+
+    /// A provider error reaches the peer as a Wyoming `error`, not as a
+    /// silently closed connection.
+    #[tokio::test]
+    async fn synthesize_failure_is_reported_as_an_error_event() {
+        let tts: Arc<dyn TextToSpeech> = Arc::new(FailingTts);
+        let peer: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        let req = Synthesize { text: "Hello there, how are you?".into(), voice: None };
+        handle_synthesize(peer, &tts, &mut buf, req).await.unwrap();
+        let mut reader = BufReader::new(buf.as_slice());
+        let f = Frame::read_async(&mut reader).await.unwrap();
+        assert_eq!(f.kind, ERROR);
+        assert!(f.data["text"].as_str().unwrap().contains("429"));
+    }
+
     #[tokio::test]
     async fn synthesize_round_trips_full_scale_sample() {
         // +1.0 maps to 0x7fff (32767) little-endian.
-        let tts = MockTts { pcm: vec![1.0], rate: 22050 };
+        let tts: Arc<dyn TextToSpeech> = Arc::new(MockTts { pcm: vec![1.0], rate: 22050 });
         let peer: SocketAddr = "127.0.0.1:9".parse().unwrap();
         let mut buf: Vec<u8> = Vec::new();
         handle_synthesize(peer, &tts, &mut buf, Synthesize { text: "x".into(), voice: None })
@@ -1088,5 +1432,12 @@ mod tests {
     fn build_info_omits_wake_when_no_models() {
         let info = build_info(&WyomingServerConfig::default());
         assert!(info.wake.is_empty(), "no wake models configured => no wake program");
+    }
+
+    #[test]
+    fn build_info_omits_asr_when_switched_off() {
+        let cfg = WyomingServerConfig { serve_asr: false, ..WyomingServerConfig::default() };
+        assert!(build_info(&cfg).asr.is_empty(), "asr off => no asr program");
+        assert_eq!(build_info(&WyomingServerConfig::default()).asr.len(), 1);
     }
 }

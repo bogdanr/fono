@@ -1645,6 +1645,9 @@ fn print_banner(paths: &Paths, config: &Config, verbosity: Verbosity) {
     }
     debug!("variant      : {}", crate::variant::VARIANT.label());
     info!("hw accel     : {}", hardware_acceleration_summary());
+    if let Some(why) = fono_core::hwcheck::local_models_unsupported() {
+        warn!("local models : off, {why}");
+    }
     info!("vulkan probe : {}", fono_core::vulkan_probe::probe().summary_line());
     // Surface what the OS thinks the user's languages are so users
     // can sanity-check the wizard's auto-selection and catch
@@ -3661,7 +3664,28 @@ fn wyoming_tts_voices(config: &Config) -> Vec<fono_net::wyoming::server::Adverti
                 version: None,
             })
             .collect(),
-        _ => Vec::new(),
+        // A cloud voice: the provider's catalogued voices, with the
+        // configured one first. Without at least one voice Home Assistant
+        // does not offer text-to-speech at all.
+        _ => {
+            let id = fono_core::providers::tts_backend_str(&config.tts.backend);
+            let palette = fono_core::provider_catalog::tts_palette(id);
+            let mut names: Vec<String> =
+                palette.voices().iter().map(|v| v.backend_id.clone()).collect();
+            let chosen = config.tts.voice.trim();
+            if !chosen.is_empty() && !names.iter().any(|n| n == chosen) {
+                names.insert(0, chosen.to_string());
+            }
+            names
+                .into_iter()
+                .map(|name| fono_net::wyoming::server::AdvertisedVoice {
+                    name,
+                    languages: config.general.languages.clone(),
+                    description: None,
+                    version: None,
+                })
+                .collect()
+        }
     }
 }
 
@@ -3753,7 +3777,8 @@ async fn spawn_wyoming_server_if_enabled(
     // a `[tts]` backend is configured (the orchestrator hands out a
     // snapshot only then). Advertised voices are derived from that
     // backend; see `wyoming_tts_voices`.
-    let serve_tts = orch.tts_snapshot().is_some();
+    let serve_tts =
+        cfg.serves(fono_core::config::WyomingService::Tts) && orch.tts_snapshot().is_some();
     let tts_voices = if serve_tts { wyoming_tts_voices(config) } else { Vec::new() };
     let advertised_voice_count = tts_voices.len();
     // Wake-word SERVER direction: expose Fono's local detector over the
@@ -3765,8 +3790,16 @@ async fn spawn_wyoming_server_if_enabled(
     // machine: the server *is* the detector. The privacy-breaking CLIENT
     // direction (`[wakeword].wyoming` with a uri) is unrelated and never
     // advertises a wake service here.
-    let serve_wake = crate::wake::detection_available();
+    let serve_wake =
+        cfg.serves(fono_core::config::WyomingService::Wake) && crate::wake::detection_available();
     let wake_models = if serve_wake { wyoming_wake_models(config) } else { Vec::new() };
+    // Conversation agent: offered only when an assistant is set up.
+    let handle_advert = if cfg.serves(fono_core::config::WyomingService::Handle) {
+        crate::wyoming_handle::advertised(config, orch)
+    } else {
+        None
+    };
+    let serve_handle = handle_advert.is_some();
     let server_cfg = fono_net::wyoming::server::WyomingServerConfig {
         bind: cfg.bind.clone(),
         port: cfg.port,
@@ -3785,6 +3818,12 @@ async fn spawn_wyoming_server_if_enabled(
         loopback_only,
         tts_voices,
         wake_models,
+        // Local speech-to-text on a CPU that cannot run it would only
+        // answer every request with an error, so it is not offered.
+        serve_asr: cfg.serves(fono_core::config::WyomingService::Asr)
+            && !(config.stt.backend == fono_core::config::SttBackend::Local
+                && fono_core::hwcheck::local_models_unsupported().is_some()),
+        handle: handle_advert,
     };
 
     let orch_for_provider = Arc::clone(orch);
@@ -3802,40 +3841,16 @@ async fn spawn_wyoming_server_if_enabled(
                  voice(s))"
             );
         }
-    } else {
-        info!("Wyoming server: no [tts] backend configured; serving STT only");
+    } else if cfg.serves(fono_core::config::WyomingService::Tts) {
+        info!("Wyoming server: no [tts] backend configured; not serving text-to-speech");
     }
     if serve_wake {
-        // Bind a wake provider that builds the *same* detector as the local
-        // listener, per connection, so the LAN wake service runs on-device.
-        // fono-net's `WakeProvider` is invoked once per accepted
-        // connection (wake sessions are stateful).
-        // Build from the *effective* config so a fresh install with no
-        // `[wakeword].phrases` still serves the runtime default model.
-        let wake_cfg = crate::wake::effective_wake_config(&config.wakeword);
-        let wake_paths = paths.clone();
-        // Ensure the served models' `.ort` files are cached even when the
-        // local always-on listener is disabled (it owns the other fetch
-        // path). Per-connection detectors built before the fetch completes
-        // fall back to the stub and recover on the next connection.
-        for phrase in &wake_cfg.phrases {
-            let id = phrase.model.clone();
-            let cache_dir = wake_paths.cache_dir.clone();
-            if fono_audio::wake_registry::resolved_paths(&id, &cache_dir).is_some_and(|r| {
-                !(r.melspec.exists() && r.embedding.exists() && r.classifier.exists())
-            }) {
-                tokio::spawn(async move {
-                    match fono_audio::wake_registry::fetch_model(&id, &cache_dir, None).await {
-                        Ok(_) => info!("Wyoming server: fetched wake model '{id}'"),
-                        Err(e) => warn!("Wyoming server: wake model '{id}' fetch failed: {e:#}"),
-                    }
-                });
-            }
-        }
-        let wake_provider: fono_net::wyoming::server::WakeProvider =
-            Arc::new(move || crate::wake::build_detector(&wake_cfg, &wake_paths));
-        server = server.with_wake(wake_provider);
-        info!("Wyoming server: wake-word detection service enabled (audio stays local)");
+        server = bind_wyoming_wake(server, config, paths);
+    }
+    if serve_handle {
+        server =
+            server.with_handle(crate::wyoming_handle::provider(Arc::clone(orch), paths.clone()));
+        info!("Wyoming server: conversation agent enabled (Fono assistant)");
     }
     match server.start().await {
         Ok(handle) => {
@@ -3851,6 +3866,46 @@ async fn spawn_wyoming_server_if_enabled(
             None
         }
     }
+}
+
+/// Bind Fono's own wake-word detector to the Wyoming server, fetching the
+/// served models first if they are missing.
+fn bind_wyoming_wake(
+    mut server: fono_net::wyoming::server::WyomingServer,
+    config: &Config,
+    paths: &Paths,
+) -> fono_net::wyoming::server::WyomingServer {
+    // Bind a wake provider that builds the *same* detector as the local
+    // listener, per connection, so the LAN wake service runs on-device.
+    // fono-net's `WakeProvider` is invoked once per accepted
+    // connection (wake sessions are stateful).
+    // Build from the *effective* config so a fresh install with no
+    // `[wakeword].phrases` still serves the runtime default model.
+    let wake_cfg = crate::wake::effective_wake_config(&config.wakeword);
+    let wake_paths = paths.clone();
+    // Ensure the served models' `.ort` files are cached even when the
+    // local always-on listener is disabled (it owns the other fetch
+    // path). Per-connection detectors built before the fetch completes
+    // fall back to the stub and recover on the next connection.
+    for phrase in &wake_cfg.phrases {
+        let id = phrase.model.clone();
+        let cache_dir = wake_paths.cache_dir.clone();
+        if fono_audio::wake_registry::resolved_paths(&id, &cache_dir)
+            .is_some_and(|r| !(r.melspec.exists() && r.embedding.exists() && r.classifier.exists()))
+        {
+            tokio::spawn(async move {
+                match fono_audio::wake_registry::fetch_model(&id, &cache_dir, None).await {
+                    Ok(_) => info!("Wyoming server: fetched wake model '{id}'"),
+                    Err(e) => warn!("Wyoming server: wake model '{id}' fetch failed: {e:#}"),
+                }
+            });
+        }
+    }
+    let wake_provider: fono_net::wyoming::server::WakeProvider =
+        Arc::new(move || crate::wake::build_detector(&wake_cfg, &wake_paths));
+    server = server.with_wake(wake_provider);
+    info!("Wyoming server: wake-word detection service enabled (audio stays local)");
+    server
 }
 
 /// The model id surfaced by the LLM server's `/v1/models` + `/api/tags`.
@@ -4110,6 +4165,20 @@ fn web_settings_url(addr: &std::net::SocketAddr) -> String {
     }
 }
 
+/// The `[server.web].trusted_proxy` address, or `None` when it is empty
+/// or not an IP address (a bad value trusts nobody, with a warning).
+fn trusted_proxy(value: &str) -> Option<std::net::IpAddr> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let ip = value.parse().ok();
+    if ip.is_none() {
+        warn!("[server.web].trusted_proxy {value:?} is not an IP address; trusting no proxy");
+    }
+    ip
+}
+
 /// Start the web settings server unconditionally (caller has already
 /// decided it should run).
 async fn spawn_web_settings(
@@ -4155,6 +4224,7 @@ async fn spawn_web_settings(
         port: cfg.port,
         auth_enabled: cfg.auth,
         loopback_only,
+        trusted_proxy: trusted_proxy(&cfg.trusted_proxy),
     };
     let hooks = web_settings_hooks(paths, orchestrator, wake, &auth, llm_ctl, wyoming_ctl);
     match fono_net::WebSettingsServer::new(server_cfg, hooks)
@@ -4928,7 +4998,7 @@ async fn ask_server(
     use fono_assistant::mcp_client::{discover, McpEndpoint};
 
     let key = server.token_ref();
-    let token = secrets.keys.get(&key).cloned();
+    let token = secrets.resolve(&key);
     if token.is_none() && !key.is_empty() {
         // Not fatal: plenty of MCP servers need no auth. The attempt will
         // fail with the server's own 401 if this one does, which is a
@@ -4962,6 +5032,22 @@ fn classify_all(
             }
         })
         .collect()
+}
+
+/// The voice a `/v1/audio/speech` request asks for, if it should be used.
+/// A client that names a provider (the settings panel does) means the
+/// voice it sends. A generic OpenAI client always sends one of OpenAI's
+/// voices, so then the voice counts only when the selected provider
+/// offers it; otherwise the configured voice is used.
+fn speech_request_voice(
+    model: &str,
+    voice: Option<String>,
+    backend: &fono_core::config::TtsBackend,
+) -> Option<String> {
+    let named = fono_core::config::Tts::speech_route_names_provider(model);
+    let palette =
+        fono_core::provider_catalog::tts_palette(fono_core::providers::tts_backend_str(backend));
+    voice.filter(|v| named || palette.by_backend_id(v).is_some())
 }
 
 /// OpenAI-compatible `POST /v1/audio/speech` handler for the settings server.
@@ -5003,7 +5089,7 @@ fn speech_hook(
             let cfg = Config::load(&config_path).map_err(|e| format!("load config: {e}"))?;
             let secrets = Secrets::load(&secrets_path).unwrap_or_default();
             let mut tts_cfg = cfg.tts.resolve_speech_route(&model)?;
-            if let Some(v) = voice {
+            if let Some(v) = speech_request_voice(&model, voice, &tts_cfg.backend) {
                 // Local engines read the voice/speaker from `[tts.local].voice`;
                 // cloud backends from the top-level `[tts].voice`.
                 if tts_cfg.backend == fono_core::config::TtsBackend::Local {
@@ -5037,19 +5123,38 @@ fn speech_hook(
             .map_err(|e| format!("{e:#}"))?
             .ok_or_else(|| "TTS is disabled ([tts].backend = none)".to_string())?;
 
-            let audio = backend
-                .synthesize(input.trim(), None, None)
-                .await
-                .map_err(|e| format!("synthesis failed: {e:#}"))?;
-
-            if format == "pcm" {
-                Ok(("audio/pcm".to_string(), fono_core::wav::encode_pcm_s16le(&audio.pcm)))
+            // Speak piece by piece and send each piece as it is made. The
+            // first piece is awaited here, so a failure before any audio
+            // (a bad key, an unknown voice) still comes back as an error.
+            let mut audio = fono_tts::synthesize_in_pieces(backend, input.trim(), None, None);
+            let first = loop {
+                match futures::StreamExt::next(&mut audio).await {
+                    Some(Ok(c)) if c.pcm.is_empty() && !c.is_final => {}
+                    Some(Ok(c)) => break c,
+                    Some(Err(e)) => return Err(format!("synthesis failed: {e:#}")),
+                    None => return Err("synthesis produced no audio".to_string()),
+                }
+            };
+            let wav = format != "pcm";
+            let mut head = if wav {
+                fono_core::wav::streaming_wav_header(first.sample_rate)
             } else {
-                Ok((
-                    "audio/wav".to_string(),
-                    fono_core::wav::encode_wav(&audio.pcm, audio.sample_rate),
-                ))
-            }
+                Vec::new()
+            };
+            head.extend(fono_core::wav::encode_pcm_s16le(&first.pcm));
+            let rest = futures::StreamExt::scan(audio, (), |(), chunk| {
+                futures::future::ready(match chunk {
+                    Ok(c) => Some(fono_core::wav::encode_pcm_s16le(&c.pcm)),
+                    Err(e) => {
+                        warn!("speech: synthesis failed after audio started: {e:#}");
+                        None
+                    }
+                })
+            });
+            let head = futures::stream::once(futures::future::ready(head));
+            let body = futures::StreamExt::boxed(futures::StreamExt::chain(head, rest));
+            let content_type = if wav { "audio/wav" } else { "audio/pcm" };
+            Ok((content_type.to_string(), body))
         })
     })
 }
@@ -5172,11 +5277,14 @@ fn meta_hook(
             .collect();
         // Tool-server tokens are named by the user, not drawn from the
         // provider catalogue, so they have to be added explicitly — otherwise
-        // the page reports a token that is present as "not set".
+        // the page reports a token that is present as "not set". The
+        // environment counts too: the Home Assistant app passes its token
+        // that way.
         for s in &cfg.assistant.tools.mcp {
             let key = s.token_ref();
             if !key.is_empty() {
-                statuses.insert(key.clone(), serde_json::Value::Bool(secrets.has_in_file(&key)));
+                let set = secrets.resolve(&key).is_some();
+                statuses.insert(key.clone(), serde_json::Value::Bool(set));
             }
         }
         serde_json::json!({
@@ -6082,7 +6190,7 @@ fn spawn_llm_advert(
     } else {
         config.network.instance_name.clone()
     };
-    let mdns_host = if host.contains('.') { host.clone() } else { format!("{host}.local") };
+    let mdns_host = format!("{host}.local");
     let spec = fono_net::discovery::advertiser::AdvertiseSpec {
         kind: fono_net::discovery::PeerKind::Ollama,
         instance_name: instance,
@@ -6093,7 +6201,7 @@ fn spawn_llm_advert(
         version: env!("CARGO_PKG_VERSION").into(),
         caps: llm_caps(),
         model: Some(llm_model_name(config)),
-        auth_required: !cfg.auth_token_ref.is_empty(),
+        auth_required: cfg.auth,
         path: None,
     };
     let advertiser = fono_net::discovery::Advertiser::new(daemon.clone());
@@ -6136,7 +6244,7 @@ fn local_llm_peer(
         version: env!("CARGO_PKG_VERSION").into(),
         caps: llm_caps(),
         model: Some(llm_model_name(config)),
-        auth_required: !config.server.llm.auth_token_ref.is_empty(),
+        auth_required: config.server.llm.auth,
         path: None,
         last_seen: Instant::now(),
     }
@@ -6166,6 +6274,7 @@ async fn spawn_discovery_if_enabled() -> Option<DiscoveryRuntime> {
             return None;
         }
     };
+    fono_net::discovery::skip_unreachable_interfaces(&daemon);
 
     let registry = fono_net::discovery::Registry::new();
     let browser = {
@@ -6224,14 +6333,8 @@ fn spawn_wyoming_advert(
     // mDNS hostnames must be in the `<name>.local.` form (RFC 6762 §19).
     // `hostname()` returns the bare short name (e.g. "nimblex"); append
     // ".local" so `ensure_trailing_dot` in the advertiser produces the
-    // correct "nimblex.local." FQDN. Without this the SRV record's host
-    // field is "nimblex." which mdns-sd browsers on other hosts cannot
-    // resolve via mDNS.
-    let mdns_host = if host.contains('.') {
-        host.clone() // already qualified (e.g. "kitchen.local")
-    } else {
-        format!("{host}.local")
-    };
+    // correct "nimblex.local." FQDN.
+    let mdns_host = format!("{host}.local");
     let spec = fono_net::discovery::advertiser::AdvertiseSpec {
         kind: fono_net::discovery::PeerKind::Wyoming,
         instance_name: instance,
@@ -6293,18 +6396,12 @@ fn local_wyoming_peer(
     }
 }
 
+/// The single-label host name used in mDNS records, e.g. `nimblex` for
+/// a system named `nimblex.example.com`.
 fn hostname() -> Option<String> {
-    // Best-effort. `gethostname` would pull a new dep; the env / file
-    // fallbacks cover every Linux + macOS we care about.
-    if let Ok(h) = std::env::var("HOSTNAME") {
-        if !h.is_empty() {
-            return Some(h);
-        }
-    }
-    std::fs::read_to_string("/etc/hostname")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    let host = fono_core::onboarding::system_host_name()?;
+    let short = fono_core::onboarding::short_host_name(&host);
+    (!short.is_empty()).then(|| short.to_string())
 }
 
 /// Convert a `fono_net::discovery::Registry` snapshot into the
@@ -6590,6 +6687,32 @@ mod tests {
         assert_eq!(peer.model.as_deref(), Some("small"));
         assert_eq!(peer.proto, "wyoming/1");
         assert!(!peer.auth_required);
+    }
+
+    /// The LLM advert reports what the server enforces: a key is needed
+    /// whenever `[server.llm] auth` is on.
+    #[test]
+    fn llm_peer_reports_inbound_key_auth() {
+        let mut cfg = Config::default();
+        cfg.server.llm.auth = true;
+        assert!(local_llm_peer(&cfg, "box", "fono-box._ollama._tcp.local.").auth_required);
+        cfg.server.llm.auth = false;
+        assert!(!local_llm_peer(&cfg, "box", "fono-box._ollama._tcp.local.").auth_required);
+    }
+
+    #[test]
+    fn speech_voice_from_generic_clients_must_exist_at_the_provider() {
+        use fono_core::config::TtsBackend;
+        let v = |s: &str| Some(s.to_string());
+        // OpenAI's voice reaches OpenAI, but not Groq or a local engine.
+        assert_eq!(speech_request_voice("tts-1", v("alloy"), &TtsBackend::OpenAI), v("alloy"));
+        assert_eq!(speech_request_voice("tts-1", v("alloy"), &TtsBackend::Groq), None);
+        assert_eq!(speech_request_voice("", v("alloy"), &TtsBackend::Local), None);
+        // Naming the provider passes any voice through, custom IDs included.
+        assert_eq!(
+            speech_request_voice("cartesia", v("a0e99841-438c"), &TtsBackend::Cartesia),
+            v("a0e99841-438c")
+        );
     }
 
     #[test]

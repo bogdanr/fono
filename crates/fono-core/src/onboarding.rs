@@ -161,14 +161,49 @@ pub fn base64url(bytes: &[u8]) -> String {
 /// to `"computer"` when no source answers.
 #[must_use]
 pub fn host_name() -> String {
-    let from_file = std::fs::read_to_string("/etc/hostname").ok();
-    let from_env = std::env::var("COMPUTERNAME").ok().or_else(|| std::env::var("HOSTNAME").ok());
-    from_file
-        .into_iter()
-        .chain(from_env)
+    system_host_name().unwrap_or_else(|| "computer".to_string())
+}
+
+/// This computer's host name as the system reports it, or `None` when no
+/// source answers. Services started by systemd usually have no `HOSTNAME`
+/// variable, and some systems have no `/etc/hostname`, so the kernel's own
+/// name is tried as well.
+#[must_use]
+pub fn system_host_name() -> Option<String> {
+    let files = ["/etc/hostname", "/proc/sys/kernel/hostname"];
+    files
+        .iter()
+        .filter_map(|f| std::fs::read_to_string(f).ok())
+        .chain(os_host_name())
+        .chain(std::env::var("COMPUTERNAME").ok())
+        .chain(std::env::var("HOSTNAME").ok())
         .map(|s| s.trim().to_string())
         .find(|s| !s.is_empty())
-        .unwrap_or_else(|| "computer".to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn os_host_name() -> Option<String> {
+    let mut buf = [0u8; 256];
+    // SAFETY: `buf` is valid for `buf.len()` bytes; gethostname writes at
+    // most that many and the result is read only up to the first NUL.
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
+    if rc != 0 {
+        return None;
+    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    Some(String::from_utf8_lossy(&buf[..end]).into_owned())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn os_host_name() -> Option<String> {
+    None
+}
+
+/// The single-label form of `host` for an mDNS `<name>.local` record:
+/// `box.example.com` and `box.local` both become `box`.
+#[must_use]
+pub fn short_host_name(host: &str) -> &str {
+    host.split('.').next().unwrap_or(host)
 }
 
 /// The label for a key Fono creates: `fono-<host>`, lower-case, limited
@@ -192,6 +227,20 @@ pub fn key_label(host: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn short_host_name_keeps_the_first_label() {
+        assert_eq!(short_host_name("box.example.com"), "box");
+        assert_eq!(short_host_name("box.local"), "box");
+        assert_eq!(short_host_name("box"), "box");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn system_host_name_is_found_without_the_environment() {
+        // The kernel always has a name, even with no HOSTNAME variable.
+        assert!(system_host_name().is_some());
+    }
 
     fn id(text: &str) -> Option<&'static str> {
         detect_provider(text).map(|p| p.id)

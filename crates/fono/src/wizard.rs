@@ -473,6 +473,11 @@ pub fn apply_primary_provider(config: &mut Config, entry: &CloudProvider) {
 /// back to local, keeps the chosen local models and per-language prompts,
 /// and leaves the assistant alone: the assistant stays opt-in, so
 /// connecting a provider for dictation must not switch it on.
+///
+/// One exception: when Fono offers itself as a conversation agent over
+/// Wyoming (a Home Assistant server) and no assistant is set up yet, the
+/// first provider that can run one becomes the assistant. A server has no
+/// other use for the key, and without it the conversation agent is missing.
 pub fn connect_provider(config: &mut Config, entry: &CloudProvider) {
     let before = config.clone();
     apply_primary_provider(config, entry);
@@ -492,6 +497,16 @@ pub fn connect_provider(config: &mut Config, entry: &CloudProvider) {
         config.tts = before.tts;
     }
     config.assistant = before.assistant;
+    let serves_agent = config.server.wyoming.enabled
+        && config.server.wyoming.serves(fono_core::config::WyomingService::Handle);
+    if serves_agent && matches!(config.assistant.backend, LlmBackend::None) {
+        if let (Some(_), Some(backend)) = (entry.assistant, parse_llm_backend(entry.id)) {
+            config.assistant.enabled = true;
+            config.assistant.backend = backend;
+            config.assistant.cloud =
+                LlmCloud { api_key_ref: entry.key_env.into(), model: String::new() };
+        }
+    }
 }
 
 /// Phase D1 — pair to [`apply_primary_provider`]. Inserts a mocked

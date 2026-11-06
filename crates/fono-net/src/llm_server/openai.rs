@@ -139,7 +139,7 @@ pub async fn chat(req: Request<Incoming>, ctx: &ServerCtx, log: &mut ReqLog) -> 
     // upstream (full tool/vision/parameter fidelity, ADR 0036).
     if let Some(upstream) = (ctx.upstream)() {
         log.set_target(Mode::Proxy(provider_label(&upstream.chat_url)), upstream.model.clone());
-        return super::proxy::forward_chat(&upstream, bytes, log).await;
+        return super::proxy::forward_chat(&upstream, &ctx.cfg.model_name, bytes, log).await;
     }
     // Adapter path: drive the `Assistant` trait.
     let body: ChatRequest = match serde_json::from_slice(&bytes) {

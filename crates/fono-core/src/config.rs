@@ -843,18 +843,25 @@ impl Tts {
     /// → OpenRouter with model `openai/tts-1`). An empty/blank `model`
     /// keeps the configured backend. Local engine tokens (`supertonic`,
     /// `piper`, `kokoro`, and `local[/engine]`) select the on-device
-    /// engine; every other leading segment must name a cloud TTS provider.
+    /// engine, and a cloud provider id selects that provider. Any other
+    /// value, such as OpenAI's `tts-1`, also keeps the configured backend,
+    /// so standard OpenAI clients work without Fono knowing their model
+    /// names.
+    ///
+    /// A provider other than the configured one starts from its own
+    /// defaults: the configured voice, cloud model and key belong to the
+    /// configured provider and would be wrong for another.
     ///
     /// This is pure routing logic — availability (whether a cloud key
     /// actually resolves) is enforced later when the backend is built.
     ///
     /// # Errors
-    /// Returns an OpenAI-shaped message when the leading segment names no
-    /// known provider or engine.
+    /// Returns an OpenAI-shaped message when `local/<engine>` names no
+    /// known engine.
     pub fn resolve_speech_route(&self, model: &str) -> std::result::Result<Self, String> {
         let mut cfg = self.clone();
         let model = model.trim();
-        if model.is_empty() {
+        if !Self::speech_route_names_provider(model) {
             return Ok(cfg);
         }
         let (provider, suffix) = match model.split_once('/') {
@@ -912,9 +919,39 @@ impl Tts {
                 cfg.backend = TtsBackend::Gemini;
                 set_cloud_model(&mut cfg, suffix);
             }
-            other => return Err(format!("unknown TTS model/provider: '{other}'")),
+            _ => unreachable!("speech_route_names_provider accepted it"),
+        }
+        if cfg.backend != self.backend {
+            cfg.voice.clear();
+            cfg.cloud = cfg
+                .cloud
+                .filter(|_| suffix.is_some())
+                .map(|c| TtsCloud { model: c.model, ..TtsCloud::default() });
         }
         Ok(cfg)
+    }
+
+    /// `true` when a speech request's `model` names a provider or engine
+    /// Fono knows, rather than leaving the choice to the configuration.
+    #[must_use]
+    pub fn speech_route_names_provider(model: &str) -> bool {
+        const PROVIDERS: &[&str] = &[
+            "local",
+            "piper",
+            "kokoro",
+            "supertonic",
+            "wyoming",
+            "openai",
+            "groq",
+            "openrouter",
+            "cartesia",
+            "deepgram",
+            "elevenlabs",
+            "speechmatics",
+            "gemini",
+        ];
+        let provider = model.trim().split('/').next().unwrap_or_default();
+        PROVIDERS.contains(&provider)
     }
 }
 
@@ -1858,6 +1895,44 @@ pub struct ServerWyoming {
     /// send a token, so a remote Home Assistant needs this left empty.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub auth_token_ref: String,
+    /// Which services this listener offers. Home Assistant creates one
+    /// entity per advertised service, so this is how a user picks, say,
+    /// Fono for speech-to-text while keeping another text-to-speech
+    /// engine. Default: every service this build can serve.
+    #[serde(default = "WyomingService::all", skip_serializing_if = "WyomingService::is_all")]
+    pub services: Vec<WyomingService>,
+}
+
+/// One service a Wyoming listener can advertise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WyomingService {
+    /// Speech-to-text.
+    Asr,
+    /// Text-to-speech.
+    Tts,
+    /// Wake-word detection.
+    Wake,
+    /// Conversation agent: Fono's assistant answers what was said.
+    /// Offered only when an assistant is set up.
+    Handle,
+}
+
+impl WyomingService {
+    pub fn all() -> Vec<Self> {
+        vec![Self::Asr, Self::Tts, Self::Wake, Self::Handle]
+    }
+
+    fn is_all(v: &[Self]) -> bool {
+        Self::all().iter().all(|s| v.contains(s))
+    }
+}
+
+impl ServerWyoming {
+    /// Whether `service` is switched on for this listener.
+    pub fn serves(&self, service: WyomingService) -> bool {
+        self.services.contains(&service)
+    }
 }
 
 impl Default for ServerWyoming {
@@ -1867,6 +1942,7 @@ impl Default for ServerWyoming {
             bind: "127.0.0.1".to_string(),
             port: 10_300,
             auth_token_ref: String::new(),
+            services: WyomingService::all(),
         }
     }
 }
@@ -1959,6 +2035,12 @@ pub struct ServerWeb {
     /// API-key store on first load, then cleared.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub auth_token_ref: String,
+    /// Address of a reverse proxy that has already authenticated its
+    /// users, trusted like a loopback caller. The Home Assistant app sets
+    /// it to the Supervisor's ingress proxy, so the Fono panel opens
+    /// without an API key. Empty (the default) trusts no proxy.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub trusted_proxy: String,
 }
 
 impl Default for ServerWeb {
@@ -1969,6 +2051,7 @@ impl Default for ServerWeb {
             port: 10_808,
             auth: true,
             auth_token_ref: String::new(),
+            trusted_proxy: String::new(),
         }
     }
 }
@@ -2413,8 +2496,37 @@ mod tests {
     }
 
     #[test]
-    fn speech_route_unknown_provider_errors() {
-        assert!(Tts::default().resolve_speech_route("nope").is_err());
+    fn speech_route_unknown_model_keeps_configured_backend() {
+        let base = Tts { backend: TtsBackend::Groq, voice: "autumn".into(), ..Tts::default() };
+        for model in ["tts-1", "gpt-4o-mini-tts", "fono", "nope/x"] {
+            let r = base.resolve_speech_route(model).unwrap();
+            assert_eq!(r.backend, TtsBackend::Groq, "{model}");
+            assert_eq!(r.voice, "autumn", "{model}");
+        }
+    }
+
+    #[test]
+    fn speech_route_to_another_provider_drops_the_configured_voice_model_and_key() {
+        let base = Tts {
+            backend: TtsBackend::OpenAI,
+            voice: "alloy".into(),
+            cloud: Some(TtsCloud {
+                api_key_ref: "MY_OPENAI".into(),
+                model: "tts-1".into(),
+                ..TtsCloud::default()
+            }),
+            ..Tts::default()
+        };
+        let r = base.resolve_speech_route("gemini").unwrap();
+        assert_eq!(r.backend, TtsBackend::Gemini);
+        assert!(r.voice.is_empty());
+        assert!(r.cloud.is_none());
+        let r = base.resolve_speech_route("cartesia/sonic-2").unwrap();
+        assert_eq!(r.cloud, Some(TtsCloud { model: "sonic-2".into(), ..TtsCloud::default() }));
+        // Naming the configured provider keeps its voice and key.
+        let r = base.resolve_speech_route("openai").unwrap();
+        assert_eq!(r.voice, "alloy");
+        assert_eq!(r.cloud.unwrap().api_key_ref, "MY_OPENAI");
     }
 
     #[test]
@@ -2536,6 +2648,24 @@ mod tests {
         let from_int: Speaker = toml::from_str("threshold = 3\n").unwrap();
         assert_eq!(from_int.threshold, SpeakerThreshold::Fixed(3.0));
         assert!(toml::from_str::<Speaker>("threshold = \"nonsense\"\n").is_err());
+    }
+
+    #[test]
+    fn wyoming_services_default_to_all_and_parse_a_subset() {
+        let all = ServerWyoming::default();
+        assert!([WyomingService::Asr, WyomingService::Tts, WyomingService::Wake]
+            .iter()
+            .all(|s| all.serves(*s)));
+        // A default list is left out of a saved config.
+        assert!(!toml::to_string(&all).unwrap().contains("services"));
+
+        let some: ServerWyoming = toml::from_str("services = [\"tts\"]").unwrap();
+        assert!(some.serves(WyomingService::Tts));
+        assert!(!some.serves(WyomingService::Asr));
+        assert!(toml::to_string(&some).unwrap().contains("services = [\"tts\"]"));
+
+        let missing: ServerWyoming = toml::from_str("enabled = true").unwrap();
+        assert_eq!(missing.services, WyomingService::all());
     }
 
     #[test]

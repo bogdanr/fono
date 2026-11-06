@@ -557,6 +557,9 @@ pub enum KeysCmd {
         #[arg(long)]
         value: Option<String>,
     },
+    /// Read a key from standard input, recognise its provider, save it and
+    /// switch Fono to that provider, as pasting it on the welcome page does.
+    Connect,
     /// Remove a key from secrets.toml.
     Remove {
         /// Key name to remove.
@@ -687,6 +690,31 @@ pub enum ConfigCmd {
     /// predates the setting), start/restart it first — or use the
     /// tray's "Settings…" entry, which starts the listener on demand.
     Web,
+    /// Let the assistant control Home Assistant through its MCP server.
+    ///
+    /// Adds a "Home Assistant" tool server at `url` and turns tools on.
+    /// The access token comes from `HOME_ASSISTANT_TOKEN` in secrets.toml
+    /// or the environment. Does nothing when a server with this address is
+    /// already set up.
+    HomeAssistant {
+        /// MCP address, e.g. `http://homeassistant.local:8123/api/mcp`.
+        url: String,
+    },
+    /// Set the languages Fono listens and speaks in.
+    ///
+    /// Give them as a list (`ro,en`), or read them from Home Assistant:
+    /// its own language and the language of each voice assistant, the
+    /// preferred one first, with English added last. The access token comes
+    /// from `HOME_ASSISTANT_TOKEN`.
+    Languages {
+        /// Languages in order of preference, e.g. `ro,en`.
+        #[arg(required_unless_present = "from_home_assistant")]
+        languages: Option<String>,
+        /// Home Assistant's websocket address, e.g.
+        /// `ws://homeassistant.local:8123/api/websocket`.
+        #[arg(long, value_name = "URL", conflicts_with = "languages")]
+        from_home_assistant: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -943,7 +971,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Some(Cmd::History { search, limit, json, last }) => {
             history_cmd(&paths, search.as_deref(), limit, json, last)
         }
-        Some(Cmd::Config { action }) => config_cmd(&paths, action),
+        Some(Cmd::Config { action }) => config_cmd(&paths, action).await,
         Some(Cmd::Models { action }) => models_cmd(&paths, action).await,
         Some(Cmd::Completions { shell }) => {
             let mut cmd = Cli::command();
@@ -1525,7 +1553,7 @@ fn history_cmd(
     Ok(())
 }
 
-fn config_cmd(paths: &Paths, action: ConfigCmd) -> Result<()> {
+async fn config_cmd(paths: &Paths, action: ConfigCmd) -> Result<()> {
     match action {
         ConfigCmd::Path => {
             println!("{}", paths.config_file().display());
@@ -1542,9 +1570,137 @@ fn config_cmd(paths: &Paths, action: ConfigCmd) -> Result<()> {
             }
         }
         ConfigCmd::Web => config_web_cmd(paths)?,
+        ConfigCmd::Languages { languages, from_home_assistant } => {
+            let list = match (languages, from_home_assistant) {
+                (_, Some(url)) => home_assistant_languages(&url).await?,
+                (Some(list), None) => language_list(list.split(',')),
+                (None, None) => unreachable!("clap requires one"),
+            };
+            if list.is_empty() {
+                anyhow::bail!("no languages given");
+            }
+            let mut cfg = Config::load(&paths.config_file())?;
+            cfg.general.languages.clone_from(&list);
+            cfg.save(&paths.config_file())?;
+            println!("languages: {}", list.join(", "));
+        }
+        ConfigCmd::HomeAssistant { url } => {
+            let mut cfg = Config::load(&paths.config_file())?;
+            if add_home_assistant_tools(&mut cfg, &url) {
+                cfg.save(&paths.config_file())?;
+                println!("the assistant can now control Home Assistant through {url}");
+            }
+        }
     }
     let _ = Secrets::load(&paths.secrets_file())?; // surface mode errors
     Ok(())
+}
+
+/// Language codes as Fono stores them: lower-case base codes (`pt-BR` →
+/// `pt`), blanks dropped, each once, in the order given.
+fn language_list<'a>(items: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for item in items {
+        let code = item.trim().split(['-', '_']).next().unwrap_or_default().to_lowercase();
+        if !code.is_empty() && !out.contains(&code) {
+            out.push(code);
+        }
+    }
+    out
+}
+
+/// Home Assistant's languages, most important first: the preferred voice
+/// assistant's, Home Assistant's own, the other voice assistants', then
+/// English.
+fn order_home_assistant_languages(
+    home: Option<&str>,
+    preferred: Option<&str>,
+    assistants: &[&str],
+) -> Vec<String> {
+    language_list(preferred.into_iter().chain(home).chain(assistants.iter().copied()).chain(["en"]))
+}
+
+/// Ask Home Assistant over its websocket API for its language and the
+/// languages of its voice assistants.
+#[cfg(feature = "realtime")]
+async fn home_assistant_languages(url: &str) -> Result<Vec<String>> {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let token = std::env::var("HOME_ASSISTANT_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("HOME_ASSISTANT_TOKEN is not set"))?;
+    let talk = async {
+        let (mut ws, _) = tokio_tungstenite::connect_async(url).await?;
+        let next =
+            async |ws: &mut tokio_tungstenite::WebSocketStream<_>| -> Result<serde_json::Value> {
+                loop {
+                    match ws.next().await {
+                        Some(Ok(Message::Text(t))) => return Ok(serde_json::from_str(&t)?),
+                        Some(Ok(_)) => {}
+                        Some(Err(e)) => return Err(e.into()),
+                        None => anyhow::bail!("Home Assistant closed the connection"),
+                    }
+                }
+            };
+        next(&mut ws).await?; // auth_required
+        let auth = serde_json::json!({"type": "auth", "access_token": token});
+        ws.send(Message::Text(auth.to_string())).await?;
+        let reply = next(&mut ws).await?;
+        if reply["type"] != "auth_ok" {
+            anyhow::bail!("Home Assistant refused the token");
+        }
+        let mut ask = async |id: u64, kind: &str| -> Result<serde_json::Value> {
+            let req = serde_json::json!({"id": id, "type": kind});
+            ws.send(Message::Text(req.to_string())).await?;
+            loop {
+                let msg = next(&mut ws).await?;
+                if msg["id"] == id {
+                    return Ok(msg["result"].clone());
+                }
+            }
+        };
+        let config = ask(1, "get_config").await?;
+        let pipelines = ask(2, "assist_pipeline/pipeline/list").await.unwrap_or_default();
+        Ok::<_, anyhow::Error>((config, pipelines))
+    };
+    let (config, pipelines) = tokio::time::timeout(std::time::Duration::from_secs(15), talk)
+        .await
+        .map_err(|_| anyhow::anyhow!("Home Assistant did not answer within 15 s"))??;
+    let list = pipelines["pipelines"].as_array().cloned().unwrap_or_default();
+    let preferred = pipelines["preferred_pipeline"].as_str();
+    let lang_of = |p: &serde_json::Value| p["language"].as_str().map(str::to_owned);
+    let preferred_lang = list.iter().find(|p| p["id"].as_str() == preferred).and_then(lang_of);
+    let others: Vec<String> = list.iter().filter_map(lang_of).collect();
+    let others: Vec<&str> = others.iter().map(String::as_str).collect();
+    Ok(order_home_assistant_languages(
+        config["language"].as_str(),
+        preferred_lang.as_deref(),
+        &others,
+    ))
+}
+
+#[cfg(not(feature = "realtime"))]
+async fn home_assistant_languages(_url: &str) -> Result<Vec<String>> {
+    anyhow::bail!("this build of Fono cannot talk to Home Assistant's websocket API")
+}
+
+/// Add Home Assistant's MCP server at `url` to the assistant's tools and
+/// turn tools on. `false` when a server with that address is already set
+/// up, so a repeat leaves the user's choices alone.
+fn add_home_assistant_tools(cfg: &mut Config, url: &str) -> bool {
+    let tools = &mut cfg.assistant.tools;
+    if tools.mcp.iter().any(|s| s.url.trim_end_matches('/') == url.trim_end_matches('/')) {
+        return false;
+    }
+    tools.mcp.push(fono_core::config::McpClientServer {
+        name: "Home Assistant".into(),
+        url: url.into(),
+        ..Default::default()
+    });
+    tools.enabled = true;
+    true
 }
 
 /// `fono config web` — make sure `[server.web]` is enabled, then open
@@ -2356,6 +2512,26 @@ async fn keys_cmd(paths: &Paths, action: KeysCmd) -> Result<()> {
             secrets.save(&secrets_path)?;
             println!("added {name} → {}", secrets_path.display());
             // Hot-reload so the daemon picks up the new key.
+            let _ = fono_ipc::request_any(
+                &paths.client_ipc_socket_candidates(),
+                &fono_ipc::Request::Reload,
+            )
+            .await;
+        }
+        KeysCmd::Connect => {
+            let pasted = prompt_for_secret("the API key")?;
+            let Some(entry) = fono_core::onboarding::detect_provider(&pasted) else {
+                anyhow::bail!("this doesn't look like an API key from a service Fono knows");
+            };
+            let key = fono_core::onboarding::key_candidate(&pasted).unwrap_or_default();
+            let mut secrets = Secrets::load(&secrets_path).unwrap_or_default();
+            secrets.insert(entry.key_env, key);
+            secrets.save(&secrets_path)?;
+            let config_path = paths.config_file();
+            let mut config = Config::load(&config_path)?;
+            crate::wizard::connect_provider(&mut config, entry);
+            config.save(&config_path)?;
+            println!("connected {}", entry.display_name);
             let _ = fono_ipc::request_any(
                 &paths.client_ipc_socket_candidates(),
                 &fono_ipc::Request::Reload,
@@ -3312,6 +3488,30 @@ fn test_overlay_cmd() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn home_assistant_languages_put_the_voice_assistant_first_and_english_last() {
+        assert_eq!(
+            order_home_assistant_languages(Some("en"), Some("ro"), &["ro", "de-CH"]),
+            vec!["ro", "en", "de"]
+        );
+        assert_eq!(order_home_assistant_languages(Some("pt-BR"), None, &[]), vec!["pt", "en"]);
+        assert_eq!(language_list(" RO, en ,,ro".split(',')), vec!["ro", "en"]);
+    }
+
+    #[test]
+    fn home_assistant_tools_are_added_once() {
+        let mut cfg = Config::default();
+        let url = "http://supervisor/core/api/mcp";
+        assert!(add_home_assistant_tools(&mut cfg, url));
+        assert!(cfg.assistant.tools.enabled);
+        assert_eq!(cfg.assistant.tools.mcp[0].token_ref(), "HOME_ASSISTANT_TOKEN");
+        // A repeat, or a user who later turned tools off, is left alone.
+        cfg.assistant.tools.enabled = false;
+        assert!(!add_home_assistant_tools(&mut cfg, &format!("{url}/")));
+        assert!(!cfg.assistant.tools.enabled);
+        assert_eq!(cfg.assistant.tools.mcp.len(), 1);
+    }
 
     /// Every directive string produced by `Verbosity::as_filter`
     /// must round-trip through `tracing_subscriber::filter::Targets`

@@ -29,6 +29,17 @@ pub const TRANSCRIPT_STOP: &str = "transcript-stop";
 /// Server replies with the standard `audio-start` / `audio-chunk`+ /
 /// `audio-stop` sequence (already typed above for the STT path).
 pub const SYNTHESIZE: &str = "synthesize";
+/// Client → server: text for one reply will arrive in `synthesize-chunk`
+/// events. Home Assistant sends this to a service that advertises
+/// `supports_synthesize_streaming`, then the chunks, then the whole text
+/// again as a plain `synthesize` for older servers, then `synthesize-stop`.
+pub const SYNTHESIZE_START: &str = "synthesize-start";
+/// Client → server: the next piece of text of a streamed reply.
+pub const SYNTHESIZE_CHUNK: &str = "synthesize-chunk";
+/// Client → server: no more text is coming for this reply.
+pub const SYNTHESIZE_STOP: &str = "synthesize-stop";
+/// Server → client: all audio for a streamed reply has been sent.
+pub const SYNTHESIZE_STOPPED: &str = "synthesize-stopped";
 /// Client → server: start a wake-word detection session, optionally
 /// narrowing which wake names to listen for. The client then streams
 /// `audio-chunk` events; the server replies with a `detection` event
@@ -40,6 +51,11 @@ pub const DETECTION: &str = "detection";
 /// Server → client: the request failed. Standard Wyoming event carrying
 /// `text` and an optional machine-readable `code`.
 pub const ERROR: &str = "error";
+/// `handled` — the reply to a `transcript` sent to an intent-handling
+/// (conversation) service.
+pub const HANDLED: &str = "handled";
+/// `not-handled` — the conversation service could not answer.
+pub const NOT_HANDLED: &str = "not-handled";
 
 /// Fono extension: key under which a client puts the server's pre-shared
 /// token in the `data` of the **first** event on a connection. Wyoming v1
@@ -111,6 +127,64 @@ pub struct Transcript {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
+    /// Opaque per-request context. Home Assistant puts
+    /// `conversation_id` (and `device_id` / `satellite_id`) here when it
+    /// sends a transcript to a conversation service.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<Value>,
+}
+
+/// `handled` — the conversation service's answer, spoken by the caller.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Handled {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<Value>,
+    /// Ask the caller to keep listening for a follow-up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continue_conversation: Option<bool>,
+}
+
+/// `not-handled` — the conversation service failed; `text` says why.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NotHandled {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<Value>,
+}
+
+/// One model row in `info.handle[].models`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HandleModel {
+    pub name: String,
+    pub languages: Vec<String>,
+    pub installed: bool,
+    pub attribution: Attribution,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+}
+
+/// One conversation (intent-handling) service entry in `info.handle`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HandleProgram {
+    pub name: String,
+    pub attribution: Attribution,
+    pub installed: bool,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    pub models: Vec<HandleModel>,
+    #[serde(default)]
+    pub supports_handled_streaming: bool,
+    /// The service may switch things in the home while answering. Home
+    /// Assistant then lists it as an agent that can control devices.
+    #[serde(default)]
+    pub supports_home_control: bool,
 }
 
 /// `transcript-start` — first event of a streaming transcript.
@@ -292,6 +366,19 @@ pub struct Synthesize {
     pub voice: Option<Voice>,
 }
 
+/// `synthesize-start` — a streamed reply begins.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SynthesizeStart {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice: Option<Voice>,
+}
+
+/// `synthesize-chunk` — the next piece of a streamed reply's text.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SynthesizeChunk {
+    pub text: String,
+}
+
 /// `info` event — the full describe response. Home Assistant's Wyoming
 /// loader expects every service family to be present as an array, even
 /// when only ASR is installed.
@@ -302,7 +389,7 @@ pub struct Info {
     #[serde(default)]
     pub tts: Vec<TtsProgram>,
     #[serde(default)]
-    pub handle: Vec<Value>,
+    pub handle: Vec<HandleProgram>,
     #[serde(default)]
     pub intent: Vec<Value>,
     #[serde(default)]

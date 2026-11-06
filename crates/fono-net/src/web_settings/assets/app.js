@@ -21,7 +21,9 @@ async function api(path, opts = {}) {
   const headers = {};
   if (TOKEN) headers['Authorization'] = 'Bearer ' + TOKEN;
   if (opts.body) headers['Content-Type'] = 'application/json';
-  const r = await fetch(path, Object.assign({}, opts, { headers }));
+  // Relative, so the page also works behind a proxy that serves it under
+  // a path prefix, such as Home Assistant's sidebar panel.
+  const r = await fetch(path.replace(/^\//, ''), Object.assign({}, opts, { headers }));
   if (!r.ok) {
     let m = 'HTTP ' + r.status;
     try { m = (await r.json()).error || m; } catch (e) { /* keep */ }
@@ -244,6 +246,13 @@ function srvField(lbl, inner) { return '<label>' + esc(lbl) + ' ' + inner + '</l
 function srvInput(path, dflt, ph) {
   return '<input class="input mono" data-bind="' + path + '" data-kind="text" value="' + esc(gv(path, dflt)) + '"'
     + (ph ? ' placeholder="' + esc(ph) + '"' : '') + ' />';
+}
+// A row of checkboxes that each add or drop one value of a list field.
+function srvMembers(path, dflt, opts) {
+  const cur = gv(path, dflt);
+  return opts.map(([val, lbl]) => '<label class="inline"><input type="checkbox" data-bind="' + path
+    + '" data-kind="member" data-dflt=\'' + esc(JSON.stringify(dflt)) + '\' value="' + val + '"'
+    + (cur.includes(val) ? ' checked' : '') + ' /> ' + esc(lbl) + '</label>').join(' ');
 }
 function srvNum(path, dflt) {
   return '<input class="input mono" data-bind="' + path + '" data-kind="num" value="' + gv(path, dflt) + '" />';
@@ -481,13 +490,20 @@ async function playSpeech(model, voice, input, statusEl) {
     if (TOKEN) headers['Authorization'] = 'Bearer ' + TOKEN;
     const body = { model: model || undefined, input: input, response_format: 'wav' };
     if (voice) body.voice = voice;
-    const r = await fetch('/v1/audio/speech', { method: 'POST', headers, body: JSON.stringify(body) });
+    const r = await fetch('v1/audio/speech', { method: 'POST', headers, body: JSON.stringify(body) });
     if (!r.ok) {
       let m = 'HTTP ' + r.status;
       try { const j = await r.json(); m = (j.error && (j.error.message || j.error)) || m; } catch (e) { /* keep */ }
       throw new Error(m);
     }
     const buf = await r.arrayBuffer();
+    // The WAV is streamed, so its header leaves the length open; fill it
+    // in now that the whole file is here, for decoders that insist on it.
+    if (buf.byteLength >= 44) {
+      const dv = new DataView(buf);
+      dv.setUint32(4, buf.byteLength - 8, true);
+      dv.setUint32(40, buf.byteLength - 44, true);
+    }
     ttsAudioCtx = ttsAudioCtx || new (window.AudioContext || window.webkitAudioContext)();
     if (ttsAudioCtx.state === 'suspended') await ttsAudioCtx.resume();
     const audio = await ttsAudioCtx.decodeAudioData(buf);
@@ -897,7 +913,9 @@ const FONO_SECTIONS = [
       return srvCard('Wyoming server (STT/TTS over the LAN)',
         srvField('Bind', srvInput('server.wyoming.bind', '127.0.0.1'))
         + srvField('Port', srvNum('server.wyoming.port', 10300))
-        + srvField('Token ref', srvInput('server.wyoming.auth_token_ref', '', 'none')),
+        + srvField('Token ref', srvInput('server.wyoming.auth_token_ref', '', 'none'))
+        + '<div>Offer ' + srvMembers('server.wyoming.services', ['asr', 'tts', 'wake', 'handle'],
+          [['asr', 'Speech-to-text'], ['tts', 'Text-to-speech'], ['wake', 'Wake word'], ['handle', 'Conversation agent']]) + '</div>',
         'server.wyoming.enabled')
         + srvCard('API server (OpenAI + Ollama compatible)',
           srvField('Bind', srvInput('server.llm.bind', '127.0.0.1'))
@@ -2048,6 +2066,12 @@ document.addEventListener('change', (e) => {
     case 'num': v = Math.max(0, parseInt(el.value, 10) || 0); break;
     case 'float': v = parseFloat(el.value) || 0; break;
     case 'radio': if (!el.checked) return; v = el.value; break;
+    case 'member': {
+      // One checkbox per value of a list field: add or drop that value.
+      const cur = gv(boundPath(el), JSON.parse(el.dataset.dflt || '[]')).filter((x) => x !== el.value);
+      v = el.checked ? cur.concat([el.value]) : cur;
+      break;
+    }
     default: v = el.value;
   }
   set(cfg, boundPath(el), v);

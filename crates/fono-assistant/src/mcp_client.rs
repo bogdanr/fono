@@ -6,14 +6,16 @@
 //! `mcp_server` integration, and anything else speaking MCP) "what tools do
 //! you have?" so the catalogue store can record them.
 //!
-//! ## Transport: SSE only
+//! ## Transports
 //!
-//! Home Assistant 2026.7 serves the **SSE** MCP transport, not streamable
-//! HTTP: `GET …/sse` opens an event stream whose first event carries a POST
-//! endpoint, JSON-RPC requests go to that endpoint, and the *responses arrive
-//! back on the stream*. That asymmetry is the whole reason this module exists
-//! rather than a few `reqwest::post` calls. Streamable HTTP is deliberately
-//! not implemented until a server we care about needs it.
+//! * **SSE**, for a URL ending in `/sse` (Home Assistant's
+//!   `…/mcp_server/sse`): `GET` opens an event stream whose first event
+//!   carries a POST endpoint, JSON-RPC requests go to that endpoint, and the
+//!   *responses arrive back on the stream*.
+//! * **Streamable HTTP**, for any other URL (Home Assistant's `…/api/mcp`):
+//!   each JSON-RPC request is a POST whose response carries the reply, as
+//!   JSON or as a short event stream. A Home Assistant app can only reach
+//!   this one, because the Supervisor proxies `/api/…` and nothing else.
 //!
 //! Discovery is a short-lived, one-shot exchange — open, `initialize`,
 //! `tools/list`, drop the stream. Nothing here holds a session open.
@@ -91,20 +93,55 @@ pub struct ToolResult {
 type ByteStream =
     std::pin::Pin<Box<dyn futures::Stream<Item = reqwest::Result<bytes::Bytes>> + Send + Sync>>;
 
-/// An open exchange with one server: the event stream we read replies from,
-/// the endpoint we post requests to, and the handshake already done.
+/// How replies come back.
+enum Transport {
+    /// Replies arrive on the event stream opened at connect time.
+    Sse { stream: ByteStream, buf: SseBuffer },
+    /// Replies arrive in each POST's response. The server may hand out a
+    /// session id at `initialize`, which every later request must carry.
+    Http { session_id: Option<String> },
+}
+
+/// `true` when `url` names an SSE endpoint rather than a Streamable HTTP one.
+fn is_sse_url(url: &str) -> bool {
+    url.trim_end_matches('/').ends_with("/sse")
+}
+
+/// An open exchange with one server: where requests go, how replies come
+/// back, and the handshake already done.
 struct Session {
     http: reqwest::Client,
     token: Option<String>,
     endpoint: String,
-    stream: ByteStream,
-    buf: SseBuffer,
+    transport: Transport,
     next_id: u64,
     server: ServerInfo,
 }
 
 impl Session {
     async fn open(ep: &McpEndpoint) -> Result<Self> {
+        let mut s = if is_sse_url(&ep.url) {
+            Self::open_sse(ep).await?
+        } else {
+            Self {
+                http: reqwest::Client::new(),
+                token: ep.token.clone(),
+                endpoint: ep.url.clone(),
+                transport: Transport::Http { session_id: None },
+                next_id: 1,
+                server: ServerInfo::default(),
+            }
+        };
+        // Handshake. Over SSE the response comes back over the stream, not
+        // the POST.
+        let init = s.request("initialize", init_params()).await?;
+        s.server = server_info(&init);
+        // Servers may refuse to answer anything before this notification.
+        s.notify("notifications/initialized").await?;
+        Ok(s)
+    }
+
+    async fn open_sse(ep: &McpEndpoint) -> Result<Self> {
         let http = reqwest::Client::builder()
             // The SSE stream idles between our requests; no total-response
             // timeout, only the outer deadline.
@@ -148,49 +185,80 @@ impl Session {
         // The server's first event names the POST endpoint.
         let endpoint = read_endpoint(&mut stream, &mut buf, origin_of(&ep.url)?).await?;
 
-        let mut s = Self {
+        Ok(Self {
             http,
             token: ep.token.clone(),
             endpoint,
-            stream,
-            buf,
+            transport: Transport::Sse { stream, buf },
             next_id: 1,
             server: ServerInfo::default(),
-        };
-
-        // Handshake. The response comes back over the stream, not the POST.
-        let init = s.request("initialize", init_params()).await?;
-        s.server = server_info(&init);
-        // Servers may refuse to answer anything before this notification.
-        s.notify("notifications/initialized").await?;
-        Ok(s)
+        })
     }
 
-    /// Post a JSON-RPC request and wait for its reply on the stream.
-    /// Returns the whole message, so callers can read `result` or `error`.
+    /// Post a JSON-RPC request and wait for its reply. Returns the whole
+    /// message, so callers can read `result` or `error`.
     async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
         let id = self.next_id;
         self.next_id += 1;
-        self.post(&rpc(id, method, params)).await?;
-        read_response(&mut self.stream, &mut self.buf, id).await
+        let resp = self.post(&rpc(id, method, params)).await?;
+        match &mut self.transport {
+            Transport::Sse { stream, buf } => read_response(stream, buf, id).await,
+            Transport::Http { session_id } => {
+                if let Some(sid) = resp.headers().get(SESSION_HEADER) {
+                    *session_id = sid.to_str().ok().map(ToOwned::to_owned);
+                }
+                read_http_response(resp, id).await
+            }
+        }
     }
 
     async fn notify(&self, method: &str) -> Result<()> {
-        self.post(&json!({"jsonrpc": "2.0", "method": method})).await
+        self.post(&json!({"jsonrpc": "2.0", "method": method})).await.map(drop)
     }
 
-    async fn post(&self, body: &Value) -> Result<()> {
+    async fn post(&self, body: &Value) -> Result<reqwest::Response> {
         let mut req = self.http.post(&self.endpoint).json(body);
+        if let Transport::Http { session_id } = &self.transport {
+            req = req.header("Accept", "application/json, text/event-stream");
+            if let Some(sid) = session_id {
+                req = req.header(SESSION_HEADER, sid);
+            }
+        }
         if let Some(tok) = &self.token {
             req = req.bearer_auth(tok);
         }
         let resp = req.send().await.with_context(|| format!("POST {}", self.endpoint))?;
         let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            bail!("{} rejected the access token ({status})", self.endpoint);
+        }
         if !status.is_success() {
             bail!("MCP server returned {status} for POST {}", self.endpoint);
         }
-        Ok(())
+        Ok(resp)
     }
+}
+
+/// The header a Streamable HTTP server uses to name the session.
+const SESSION_HEADER: &str = "mcp-session-id";
+
+/// The reply to request `id` in a Streamable HTTP response, which is either
+/// the JSON-RPC message itself or an event stream that carries it.
+async fn read_http_response(resp: reqwest::Response, id: u64) -> Result<Value> {
+    let is_stream = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.starts_with("text/event-stream"));
+    if is_stream {
+        let mut stream: ByteStream = Box::pin(resp.bytes_stream());
+        return read_response(&mut stream, &mut SseBuffer::new(), id).await;
+    }
+    let msg: Value = resp.json().await.context("read MCP response")?;
+    if let Some(err) = msg.get("error") {
+        bail!("MCP server error: {err}");
+    }
+    Ok(msg)
 }
 
 /// Open the stream, `initialize`, `tools/list`, close.
@@ -208,14 +276,20 @@ async fn discover_inner(ep: &McpEndpoint) -> Result<Discovery> {
     let mut s = Session::open(ep).await?;
     let listed = s.request("tools/list", json!({})).await?;
     let mut tools = parse_tools(&listed)?;
+    remember_wire_names(&ep.url, &tools);
+    for t in &mut tools {
+        t.name = short_name(&t.name).to_owned();
+    }
     tools.sort_by(|a, b| a.name.cmp(&b.name));
+    tools.dedup_by(|a, b| a.name == b.name);
     // While we are here, ask the server what areas it has. Doing it now
     // rather than per command is the whole point: the model can be told the
     // real names without anybody waiting for a round-trip to find them.
     let mut places = Vec::new();
     let mut devices = Vec::new();
     if tools.iter().any(|t| t.name == LIVE_CONTEXT) {
-        match s.request("tools/call", json!({"name": LIVE_CONTEXT, "arguments": {}})).await {
+        let wire = wire_name(&ep.url, LIVE_CONTEXT);
+        match s.request("tools/call", json!({"name": wire, "arguments": {}})).await {
             Ok(msg) => {
                 let text = parse_tool_result(&msg).text;
                 places = parse_places(&text);
@@ -349,8 +423,57 @@ pub async fn call_tool(ep: &McpEndpoint, name: &str, args: &Value) -> Result<Too
 
 async fn call_tool_inner(ep: &McpEndpoint, name: &str, args: &Value) -> Result<ToolResult> {
     let mut s = Session::open(ep).await?;
-    let msg = s.request("tools/call", json!({"name": name, "arguments": args})).await?;
+    if !knows_wire_names(&ep.url) {
+        let listed = s.request("tools/list", json!({})).await?;
+        remember_wire_names(&ep.url, &parse_tools(&listed)?);
+    }
+    let wire = wire_name(&ep.url, name);
+    let msg = s.request("tools/call", json!({"name": wire, "arguments": args})).await?;
     Ok(parse_tool_result(&msg))
+}
+
+/// A tool's name without the namespace a server may put in front of it.
+///
+/// Home Assistant namespaces tools by the API that provides them on some
+/// endpoints (`intent__HassTurnOn`, `homeassistant__GetLiveContext`) and
+/// not on others. Fono's catalogue, rules and verification all know the
+/// plain names, so every name is stored plain and turned back into the
+/// server's own spelling only when a tool is called.
+fn short_name(wire: &str) -> &str {
+    wire.rsplit_once("__").map_or(wire, |(_, name)| name)
+}
+
+type WireNames = std::collections::HashMap<String, std::collections::HashMap<String, String>>;
+
+/// Plain tool name → the server's own name, per server URL.
+fn wire_names() -> &'static std::sync::Mutex<WireNames> {
+    static NAMES: std::sync::OnceLock<std::sync::Mutex<WireNames>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(std::sync::Mutex::default)
+}
+
+fn remember_wire_names(url: &str, tools: &[RawTool]) {
+    let mut map = std::collections::HashMap::new();
+    for t in tools {
+        // Two namespaces offering the same plain name: the first one wins,
+        // as it does in the deduplicated catalogue.
+        map.entry(short_name(&t.name).to_owned()).or_insert_with(|| t.name.clone());
+    }
+    if let Ok(mut names) = wire_names().lock() {
+        names.insert(url.to_owned(), map);
+    }
+}
+
+fn knows_wire_names(url: &str) -> bool {
+    wire_names().lock().is_ok_and(|n| n.contains_key(url))
+}
+
+/// The name `url`'s server knows `name` by, or `name` itself when unknown.
+fn wire_name(url: &str, name: &str) -> String {
+    wire_names()
+        .lock()
+        .ok()
+        .and_then(|n| n.get(url).and_then(|m| m.get(name)).cloned())
+        .unwrap_or_else(|| name.to_owned())
 }
 
 fn parse_tool_result(msg: &Value) -> ToolResult {
@@ -616,6 +739,91 @@ mod tests {
         assert_eq!(info.name, "Home Assistant");
         assert_eq!(info.version, "2026.7.3");
         assert_eq!(info.protocol_version, "2025-03-26");
+    }
+
+    #[test]
+    fn namespaced_tool_names_are_stored_plain() {
+        assert_eq!(short_name("intent__HassTurnOn"), "HassTurnOn");
+        assert_eq!(short_name("homeassistant__GetLiveContext"), "GetLiveContext");
+        assert_eq!(short_name("HassTurnOn"), "HassTurnOn");
+    }
+
+    #[test]
+    fn picks_the_transport_from_the_url() {
+        assert!(is_sse_url("http://homeassistant.local:8123/mcp_server/sse"));
+        assert!(is_sse_url("http://ha:8123/mcp_server/sse/"));
+        assert!(!is_sse_url("http://supervisor/core/api/mcp"));
+    }
+
+    /// A Streamable HTTP server, the way Home Assistant's `/api/mcp`
+    /// behaves: every reply is the POST's own JSON body. The mock also
+    /// hands out a session id and refuses requests that don't carry it.
+    #[tokio::test]
+    async fn calls_a_tool_over_streamable_http() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { break };
+                let mut raw = Vec::new();
+                let mut chunk = [0u8; 4096];
+                // Read the head, then exactly Content-Length body bytes.
+                let (head, body) = loop {
+                    let n = sock.read(&mut chunk).await.unwrap();
+                    raw.extend_from_slice(&chunk[..n]);
+                    let text = String::from_utf8_lossy(&raw).to_string();
+                    if let Some(i) = text.find("\r\n\r\n") {
+                        let head = text[..i].to_lowercase();
+                        let len: usize = head
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .map_or(0, |v| v.trim().parse().unwrap());
+                        if raw.len() >= i + 4 + len {
+                            break (head, text[i + 4..i + 4 + len].to_string());
+                        }
+                    }
+                };
+                let msg: Value = serde_json::from_str(&body).unwrap();
+                let method = msg["method"].as_str().unwrap_or_default();
+                let has_session = head.contains("mcp-session-id: s1");
+                let reply = match (method, has_session) {
+                    ("initialize", _) => json!({"jsonrpc": "2.0", "id": msg["id"], "result": {
+                        "protocolVersion": "2025-03-26",
+                        "serverInfo": {"name": "Home Assistant", "version": "2026.9"}}}),
+                    (_, false) => Value::Null,
+                    ("tools/list", true) => json!({"jsonrpc": "2.0", "id": msg["id"], "result": {
+                        "tools": [{"name": "intent__HassTurnOn", "inputSchema": {}}]}}),
+                    // Only the server's own, namespaced name runs the tool.
+                    ("tools/call", true) if msg["params"]["name"] == "intent__HassTurnOn" => {
+                        json!({"jsonrpc": "2.0", "id": msg["id"], "result": {
+                            "content": [{"type": "text", "text": "turned on"}], "isError": false}})
+                    }
+                    ("tools/call", true) => json!({"jsonrpc": "2.0", "id": msg["id"], "result": {
+                        "content": [{"type": "text", "text": "not found"}], "isError": true}}),
+                    _ => json!({}),
+                };
+                let (status, body) = if reply.is_null() {
+                    ("400 Bad Request", String::new())
+                } else {
+                    ("200 OK", reply.to_string())
+                };
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n\
+                     mcp-session-id: s1\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                sock.write_all(resp.as_bytes()).await.unwrap();
+            }
+        });
+        let ep = McpEndpoint {
+            url: format!("http://{addr}/api/mcp"),
+            token: Some("t".into()),
+            timeout: Duration::from_secs(5),
+        };
+        let out = call_tool(&ep, "HassTurnOn", &json!({"name": "Kitchen"})).await.unwrap();
+        assert_eq!(out.text, "turned on");
+        assert!(!out.is_error);
     }
 
     /// Live check against a real MCP server — the only thing that proves the
