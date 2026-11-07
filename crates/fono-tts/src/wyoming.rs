@@ -249,7 +249,7 @@ impl TextToSpeech for WyomingTts {
                 )
             })??;
         if f.kind == INFO {
-            let info: Info = serde_json::from_value(f.data).unwrap_or_default();
+            let info = Info::from_value_or_default(f.data);
             let voices = info.tts.iter().map(|p| p.voices.len()).sum::<usize>();
             tracing::debug!(
                 target: "fono::tts::wyoming",

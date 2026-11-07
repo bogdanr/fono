@@ -299,7 +299,7 @@ impl SpeechToText for WyomingStt {
                 format!("wyoming describe to {} timed out (server unreachable?)", self.endpoint())
             })??;
         if f.kind == INFO {
-            let info: Info = serde_json::from_value(f.data).unwrap_or_default();
+            let info = Info::from_value_or_default(f.data);
             let models = info.asr.iter().map(|asr| asr.models.len()).sum::<usize>();
             let streaming = info.asr.iter().any(|asr| asr.supports_transcript_streaming);
             tracing::debug!(

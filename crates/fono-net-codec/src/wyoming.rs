@@ -402,6 +402,17 @@ pub struct Info {
     pub satellite: Option<Value>,
 }
 
+impl Info {
+    /// Reads a describe reply; one that can't be read counts as empty.
+    /// Kept out of line so the speech-to-text and text-to-speech clients
+    /// share one copy of the parser instead of each carrying their own.
+    #[must_use]
+    #[inline(never)]
+    pub fn from_value_or_default(data: Value) -> Self {
+        serde_json::from_value(data).unwrap_or_default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
