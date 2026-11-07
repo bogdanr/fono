@@ -573,7 +573,10 @@ mod tests {
         w.start_oauth(openrouter(), auth_url, "http://localhost:7/oauth/callback").unwrap();
         let state = w.lock().oauth.keys().next().unwrap().clone();
         // Age the session past its lifetime: refused, and gone afterwards.
-        w.lock().oauth.get_mut(&state).unwrap().started -= OAUTH_TTL;
+        // Windows counts `Instant` from boot, so a runner up for less than
+        // the lifetime can't go that far back; there is nothing to test then.
+        let Some(aged) = Instant::now().checked_sub(OAUTH_TTL) else { return };
+        w.lock().oauth.get_mut(&state).unwrap().started = aged;
         assert!(w.oauth_callback("code", &state).await.is_err());
         assert!(w.lock().oauth.is_empty(), "a used state must not be accepted again");
     }
