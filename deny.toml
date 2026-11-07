@@ -47,10 +47,13 @@ ignore = [
     # it. Re-evaluate when wayland-scanner bumps its quick-xml pin.
     "RUSTSEC-2026-0194", # quick-xml (transitive via wayland-scanner, build-time only)
     "RUSTSEC-2026-0195", # quick-xml (transitive via wayland-scanner, build-time only)
-    # zbus_names was folded into zbus 6. The tray (ksni), desktop
-    # notifications (notify-rust) and the portal hotkeys (ashpd) still use
-    # zbus 4/5, so it stays until they move. Unmaintained, not vulnerable.
+    # zbus_names, zvariant and zvariant_derive were folded into zbus 6. The
+    # tray (ksni), desktop notifications (notify-rust) and the portal hotkeys
+    # (ashpd) still use zbus 4/5, so they stay until those move.
+    # Unmaintained, not vulnerable.
+    "RUSTSEC-2026-0370", # zvariant (transitive via zbus, unmaintained)
     "RUSTSEC-2026-0371", # zbus_names (transitive via zbus, unmaintained)
+    "RUSTSEC-2026-0372", # zvariant_derive (transitive via zbus, unmaintained)
 ]
 
 [licenses]
