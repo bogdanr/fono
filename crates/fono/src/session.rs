@@ -813,6 +813,80 @@ fn cortex_cmd_from_brain_event(ev: fono_core::brain_tap::BrainEvent) -> fono_ove
     }
 }
 
+/// Builds the configured speech-to-text backend. When local speech-to-text
+/// can't run yet (its model is still downloading) or at all (the CPU lacks
+/// what it needs), returns a stand-in that explains why, so text-to-speech,
+/// the wake word and the assistant keep working.
+fn build_stt_or_stand_in(
+    config: &Config,
+    secrets: &Secrets,
+    paths: &Paths,
+) -> Result<Arc<dyn SpeechToText>> {
+    match fono_stt::build_stt(&config.stt, &config.general, secrets, &paths.whisper_models_dir()) {
+        Ok(stt) => Ok(stt),
+        Err(_) if crate::models::local_stt_pending(paths, config) => Ok(Arc::new(SttUnavailable(
+            "the speech-to-text model is still downloading; try again in a minute",
+        ))),
+        Err(_)
+            if config.stt.backend == fono_core::config::SttBackend::Local
+                && fono_core::hwcheck::local_models_unsupported().is_some() =>
+        {
+            Ok(Arc::new(SttUnavailable(
+                "local speech-to-text needs a newer CPU; add a cloud API key to use it",
+            )))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Stands in for local speech-to-text while its model downloads, or on a CPU
+/// that can't run it. Every request fails with the reason it holds.
+struct SttUnavailable(&'static str);
+
+#[async_trait::async_trait]
+impl SpeechToText for SttUnavailable {
+    async fn transcribe(
+        &self,
+        _pcm: &[f32],
+        _sample_rate: u32,
+        _lang: Option<&str>,
+    ) -> Result<fono_stt::Transcription> {
+        anyhow::bail!(self.0)
+    }
+
+    fn name(&self) -> &'static str {
+        "local (unavailable)"
+    }
+
+    fn is_local(&self) -> bool {
+        true
+    }
+}
+
+/// Stands in for local text-to-speech while its voice downloads.
+struct TtsDownloading;
+
+#[async_trait::async_trait]
+impl TextToSpeech for TtsDownloading {
+    async fn synthesize(
+        &self,
+        _text: &str,
+        _voice: Option<&str>,
+        _lang: Option<&str>,
+    ) -> Result<fono_tts::TtsAudio> {
+        anyhow::bail!("the text-to-speech voice is still downloading; try again in a minute")
+    }
+
+    fn name(&self) -> &'static str {
+        "local (downloading)"
+    }
+
+    fn native_sample_rate(&self) -> u32 {
+        // Never produces audio; any valid rate will do.
+        fono_core::config::AUDIO_SAMPLE_RATE_HZ
+    }
+}
+
 impl SessionOrchestrator {
     /// Construct from a fresh config + secrets, building both backends.
     /// Returns an error if the STT factory fails — the daemon should
@@ -826,9 +900,7 @@ impl SessionOrchestrator {
         action_tx: mpsc::UnboundedSender<HotkeyAction>,
         held_flags: fono_hotkey::KeyHeldFlags,
     ) -> Result<Self> {
-        let stt =
-            fono_stt::build_stt(&config.stt, &config.general, secrets, &paths.whisper_models_dir())
-                .context("build STT backend")?;
+        let stt = build_stt_or_stand_in(&config, secrets, paths).context("build STT backend")?;
         // Arm (or keep disarmed) the Glass Cortex capture latch before
         // any embedded LLM backend is constructed — the polish and
         // assistant factories read it at build time.
@@ -865,6 +937,9 @@ impl SessionOrchestrator {
             &paths.voices_dir(),
         ) {
             Ok(opt) => opt,
+            Err(_) if crate::models::local_tts_pending(paths, &config) => {
+                Some(Arc::new(TtsDownloading) as Arc<dyn TextToSpeech>)
+            }
             Err(e) => {
                 warn!("TTS backend unavailable; assistant replies will be silent: {e:#}");
                 None
@@ -1104,9 +1179,7 @@ impl SessionOrchestrator {
         // effect without a daemon restart. Idempotent on the `"auto"`
         // default path; see `daemon::apply_inject_backend_env`.
         crate::daemon::apply_inject_backend_env(&cfg.inject);
-        let new_stt =
-            fono_stt::build_stt(&cfg.stt, &cfg.general, &secrets, &paths.whisper_models_dir())
-                .context("reload: build STT")?;
+        let new_stt = build_stt_or_stand_in(&cfg, &secrets, &paths).context("reload: build STT")?;
         // Re-arm the Glass Cortex capture latch so a `[overlay].brain_capture`
         // edit takes effect on the backends rebuilt below.
         #[cfg(feature = "llama-local")]
@@ -6248,6 +6321,22 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
+
+    #[tokio::test]
+    async fn a_missing_local_speech_model_gets_a_stand_in_that_says_why() {
+        // A first start: local speech-to-text configured, its model not on
+        // disk yet. Fono must still come up, and say why listening fails.
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        let mut config = Config::default();
+        config.stt.backend = fono_core::config::SttBackend::Local;
+        let stt = build_stt_or_stand_in(&config, &Secrets::default(), &paths).unwrap();
+        let err = stt.transcribe(&[0.0; 160], 16_000, None).await.unwrap_err().to_string();
+        assert!(
+            err.contains("still downloading") || err.contains("newer CPU"),
+            "unexpected error: {err}"
+        );
+    }
 
     #[test]
     fn a_dictated_command_is_typed_as_a_command_not_as_a_sentence() {

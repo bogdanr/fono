@@ -322,6 +322,11 @@ assistant provider.
 
 Newest first.
 
+- ![v0.20.1](https://img.shields.io/badge/v0.20.1-2026--11--07-blue?style=flat-square)
+  **A fresh install answers within a second.** Models download in the
+  background instead of before Fono starts listening, and a CPU without AVX2
+  no longer stops Home Assistant from finding Fono.
+
 - ![v0.20.0](https://img.shields.io/badge/v0.20.0-2026--11--06-blue?style=flat-square)
   **Fono as a Home Assistant voice app.** One app serves speech-to-text,
   text-to-speech, the wake word and a conversation agent that controls the

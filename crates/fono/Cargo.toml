@@ -141,7 +141,7 @@ windows-defaults = ["tray", "local-models", "llama-local", "interactive", "realt
 # Both added edges are already in the binary's dependency graph (`whatlang` via
 # fono-polish and fono-tts, `async-trait` throughout), so this is net-zero on
 # the shipped artefact.
-bench-actions = ["dep:whatlang", "dep:async-trait"]
+bench-actions = ["dep:whatlang"]
 
 [dependencies]
 fono-core = { path = "../fono-core", features = ["vulkan-probe"] }
@@ -206,9 +206,9 @@ libloading = "0.8"
 # `bench-actions` only; already in the binary graph via fono-polish and
 # fono-tts, so it adds nothing to the shipped artefact.
 whatlang = { workspace = true, optional = true }
-# The benchmark's stand-in speech-to-text, which exists only to fail loudly if
-# the text path ever reaches it. Already a dev-dependency below.
-async-trait = { workspace = true, optional = true }
+# Stand-in speech-to-text implementations: the one used while the local model
+# downloads, and the benchmark's. Already in the binary graph via fono-stt.
+async-trait = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }

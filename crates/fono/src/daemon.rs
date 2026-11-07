@@ -209,9 +209,14 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
         }
     }
 
-    // Ensure referenced models are on disk before we wire the orchestrator.
-    if let Err(e) = crate::models::ensure_models(paths, &config).await {
-        warn!("model preflight failed: {e:#}");
+    // Missing models download in the background, so a first start answers
+    // right away instead of after a few hundred MB. The orchestrator reloads
+    // once they land.
+    let downloading = crate::models::downloads_pending(paths, &config);
+    if !downloading {
+        if let Err(e) = crate::models::ensure_models(paths, &config).await {
+            warn!("model preflight failed: {e:#}");
+        }
     }
 
     // ---------------------------------------------------------------
@@ -248,6 +253,21 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
             None
         }
     };
+
+    if downloading {
+        let (paths, config, orch) = (paths.clone(), Arc::clone(&config), orchestrator.clone());
+        tokio::spawn(async move {
+            if let Err(e) = crate::models::ensure_models(&paths, &config).await {
+                warn!("model download failed: {e:#}");
+            }
+            if let Some(orch) = orch {
+                match orch.reload().await {
+                    Ok(summary) => info!("models ready: {summary}"),
+                    Err(e) => warn!("reload after model download failed: {e:#}"),
+                }
+            }
+        });
+    }
 
     // ---------------------------------------------------------------
     // Always-on wake-word listener (Phases D/E). Off unless

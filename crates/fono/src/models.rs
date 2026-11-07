@@ -240,7 +240,8 @@ struct Pending {
 /// notification from becoming noise.
 fn pending_downloads(paths: &Paths, config: &Config) -> Vec<Pending> {
     let mut pending = Vec::new();
-    if config.stt.backend == SttBackend::Local {
+    let local_models = fono_core::hwcheck::local_models_unsupported().is_none();
+    if local_models && config.stt.backend == SttBackend::Local {
         let name = &config.stt.local.model;
         let quant = &config.stt.local.quantization;
         let missing = resolve_local_stt(name, quant)
@@ -256,10 +257,10 @@ fn pending_downloads(paths: &Paths, config: &Config) -> Vec<Pending> {
     // Both are gated on `enabled`: a role switched off must never pull a
     // multi-gigabyte model down for something that will not run.
     let mut llms: Vec<(&str, &String)> = Vec::new();
-    if config.polish.enabled && config.polish.backend == LlmBackend::Local {
+    if local_models && config.polish.enabled && config.polish.backend == LlmBackend::Local {
         llms.push(("cleanup model", &config.polish.local.model));
     }
-    if config.assistant.enabled && config.assistant.backend == LlmBackend::Local {
+    if local_models && config.assistant.enabled && config.assistant.backend == LlmBackend::Local {
         llms.push(("assistant model", &config.assistant.local.model));
     }
     let mut seen: Vec<String> = Vec::new();
@@ -279,6 +280,25 @@ fn pending_downloads(paths: &Paths, config: &Config) -> Vec<Pending> {
         }
     }
     pending
+}
+
+/// Whether any model the config needs still has to be downloaded.
+#[must_use]
+pub fn downloads_pending(paths: &Paths, config: &Config) -> bool {
+    !pending_downloads(paths, config).is_empty()
+}
+
+/// Whether the local speech-to-text model is one of those downloads, so a
+/// missing model means "not here yet" rather than a broken setup.
+#[must_use]
+pub fn local_stt_pending(paths: &Paths, config: &Config) -> bool {
+    pending_downloads(paths, config).iter().any(|p| p.what.starts_with("speech model"))
+}
+
+/// Whether the local text-to-speech voice is one of those downloads.
+#[must_use]
+pub fn local_tts_pending(paths: &Paths, config: &Config) -> bool {
+    pending_downloads(paths, config).iter().any(|p| p.what == "text-to-speech voice")
 }
 
 /// Announce the first-run model download to the desktop, if there is one
@@ -352,21 +372,23 @@ pub fn whisper_dest(paths: &Paths, name: &str, quant: Quantization) -> PathBuf {
 /// download finishes in seconds, stay silent.
 pub async fn ensure_models(paths: &Paths, config: &Config) -> Result<()> {
     announce_pending_downloads(paths, config);
-    if config.stt.backend == SttBackend::Local {
+    // A CPU that can't run local models never loads them, so don't fetch them.
+    let local_models = fono_core::hwcheck::local_models_unsupported().is_none();
+    if local_models && config.stt.backend == SttBackend::Local {
         let r =
             ensure_local_stt(paths, &config.stt.local.model, &config.stt.local.quantization).await;
         if let Err(e) = r {
             warn!("auto-download of whisper model failed: {e:#}");
         }
     }
-    if config.polish.enabled && config.polish.backend == LlmBackend::Local {
+    if local_models && config.polish.enabled && config.polish.backend == LlmBackend::Local {
         // Boxed: the LLM-ensure future may carry registry/download state
         // large enough to trip stack-frame lints when inlined here.
         if let Err(e) = Box::pin(ensure_local_llm(paths, &config.polish.local.model)).await {
             warn!("auto-download of LLM model failed: {e:#}");
         }
     }
-    if config.assistant.enabled && config.assistant.backend == LlmBackend::Local {
+    if local_models && config.assistant.enabled && config.assistant.backend == LlmBackend::Local {
         // Boxed for the same reason as the polish LLM ensure above; local
         // assistant and cleanup share the registry/download path.
         if let Err(e) = Box::pin(ensure_local_llm(paths, &config.assistant.local.model)).await {

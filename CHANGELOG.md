@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.1] — 2026-11-07
+
+### Fixed
+
+- **A fresh install answers within a second.** Fono used to download its
+  models (about 400 MB) before it started listening, so Home Assistant
+  couldn't reach a new install for 20 seconds or more. It now starts right
+  away and downloads in the background. Until a model arrives, requests that
+  need it fail with "still downloading, try again in a minute".
+- **On a CPU without AVX2 and no cloud key, Fono runs instead of giving up.**
+  It used to skip its Wyoming server, so Home Assistant never found it. Now
+  text-to-speech, the wake word and the assistant work, and speech-to-text
+  says it needs a cloud API key.
+- Fono no longer downloads local models a CPU can't run.
+
 ## [0.20.0] — 2026-11-06
 
 ### Added
